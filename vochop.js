@@ -1375,8 +1375,9 @@ function startVoice(sl, n, vel, rate, mode, keep, tune, pads, chop) {
     var amp = ((1 - vs) + vs * Math.pow(clamp(vel, 1, 127) / 127, 1.6)) * normGain * 0.8;
     var pan = ((vi % 2) ? 1 : -1) * clamp(P.spread / 100, 0, 1) * (0.35 + 0.65 * ((vi * 0.37) % 1));
     var ang = (pan + 1) * Math.PI / 4;
-    if (tune) { outlet(0, vi, "t", tune.hz); outlet(0, vi, "c", tune.amt); outlet(0, vi, "r", 1); }
-    else { outlet(0, vi, "r", 0); outlet(0, vi, "t", 0); }
+    // retune~ stays on; "no tuning" = correction 0 and no pitch lock (documented as no correction)
+    if (tune) { outlet(0, vi, "t", tune.hz); outlet(0, vi, "c", tune.amt); }
+    else { outlet(0, vi, "t", 0); outlet(0, vi, "c", 0); }
     outlet(0, vi, "pn", Math.cos(ang), Math.sin(ang));
     voiceMsg(vi, "s0", s0);
     voiceMsg(vi, "s1", s1);

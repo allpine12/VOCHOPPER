@@ -461,8 +461,8 @@ def build_instrument():
         P.con(gen, 11, snp, 0); P.con(ed, 0, snp, 0)
         ve = P.obj("prepend vend %d" % v, x + 300, y + 150, 1, 1, [""], w=100)
         P.con(snp, 0, ve, 0); P.con(ve, 0, js, 0)
-    # retune~ starts bypassed in every voice
-    loadrt = P.msg("0", 1500, 1300)
+    # retune~ is switched on in every voice; voices without tuning use correction_amount 0
+    loadrt = P.msg("1", 1500, 1300)
     P.con(tbbb, 1, loadrt, 0)
     for bx in list(P.boxes):
         b = bx["box"]

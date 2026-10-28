@@ -39,7 +39,7 @@ let v = vm0().filter((m) => m[1] === "g");
 const g = {}; v.forEach((m) => g[m[2]] = m[3]);
 assert(Math.abs(g.s0 - ctx.words[1].s / w.sr * 1000) < 0.01, "s0");
 assert.strictEqual(g.mode, 0); assert.strictEqual(g.hold, 1);
-assert(vm0().some((m) => m[1] === "r" && m[2] === 0), "retune off for plain pads");
+assert(vm0().some((m) => m[1] === "c" && m[2] === 0), "no correction for plain pads");
 assert(ctx.sel === ctx.words[1], "pad selects word 2");
 ctx.padclick(57, 0);
 
