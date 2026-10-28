@@ -26,7 +26,7 @@ function status(st, msg) { out("asrstatus", st, msg || ""); }
 
 function download(url, dest, redirects = 0) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "VoChop" } }, (res) => {
+    const req = https.get(url, { headers: { "User-Agent": "VoChop" } }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 8) {
         res.resume();
         const next = new URL(res.headers.location, url).toString();
@@ -42,10 +42,19 @@ function download(url, dest, redirects = 0) {
         const pct = total ? Math.floor(got / total * 100) : -1;
         if (total > 5e6 && pct != lastPct && pct % 5 == 0) { lastPct = pct; status("info", "downloading speech model " + pct + "% (one time, ~670 MB)"); }
       });
+      const fail = (e) => { res.unpipe(f); f.destroy(); try { fs.unlinkSync(tmp); } catch (x) { } reject(e); };
+      res.on("error", fail);
+      res.on("aborted", () => fail(new Error("download interrupted")));
+      f.on("error", fail);
       res.pipe(f);
-      f.on("finish", () => f.close(() => { fs.renameSync(tmp, dest); resolve(); }));
-      f.on("error", reject);
-    }).on("error", reject);
+      // rename only a complete file, so a dropped connection is retried next time
+      f.on("finish", () => f.close(() => {
+        if (total && got !== total) return fail(new Error("download incomplete (" + got + "/" + total + " bytes)"));
+        fs.renameSync(tmp, dest); resolve();
+      }));
+    });
+    req.setTimeout(60000, () => req.destroy(new Error("download stalled")));
+    req.on("error", reject);
   });
 }
 
@@ -143,8 +152,9 @@ if (maxApi) {
   maxApi.addHandler("asrbegin", handleBegin);
   maxApi.addHandler("asrchunk", handleChunk);
   maxApi.addHandler("asrgo", handleGo);
+  maxApi.addHandler("retry", () => { if (!recognizer) boot(); });
   boot();
 }
 
-module.exports = { boot, recognize, toWords, handleBegin, handleChunk, handleGo,
+module.exports = { boot, download, recognize, toWords, handleBegin, handleChunk, handleGo,
                    _setRecognizer: (r) => { recognizer = r; } };

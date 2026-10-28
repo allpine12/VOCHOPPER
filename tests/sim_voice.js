@@ -53,4 +53,8 @@ assert(o[100][0] < 200 && o[2000][0] < o[100][0], "reverse runs backwards");
 v = voice(); Object.assign(v.Pm, { s0: 0, s1: 1000, mode: 1, amp: 1, hold: 1, trig: 1 }); run(v, 1000, SR);
 v.Pm.kill = 2; v.Pm.trig = 2; o = run(v, SR * 0.05, SR);
 assert(o[o.length - 1][1] > 0.9 && !o.some((x) => x[10] == 1), "retriggered voice keeps sounding");
+// reverse + repeat starts inside the repeat window (no silent lead-in)
+v = voice(); Object.assign(v.Pm, { s0: 0, s1: 600, mode: 3, rev: 1, rlen: 125, amp: 1, hold: 1, trig: 1 });
+o = run(v, SR * 0.02, SR);
+assert(o[441][1] > 0.9 && o[441][0] <= 125, "reverse repeat audible at once");
 console.log("voice sim OK");

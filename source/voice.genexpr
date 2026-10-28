@@ -62,7 +62,13 @@ if (trig != ltrig) {
 	killing = 0;
 	stage = 0;
 	xf = 0;
-	pos = rev > 0.5 ? s1 : s0;
+	pos = s0;
+	if (rev > 0.5) {
+		pos = s1;
+		if (mode > 2.5) {
+			pos = min(s1, s0 + max(5, rlen));
+		}
+	}
 	g1p = 0;
 	g2p = 0.25;
 	g3p = 0.5;

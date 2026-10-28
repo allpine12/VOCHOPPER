@@ -378,7 +378,7 @@ def build_instrument():
     params.append((rev, "reverse"))
     pads = menu(P, "Pads", 1420, 300, (CX, 40, 56, 15), ["One-Shot", "Gate", "Loop", "Repeat"], init=0)
     params.append((pads, "pads"))
-    small = [("Octave", "octave", -3, 3, 0, 58), ("Poly", "poly", 1, 8, 8, 94), ("Velocity", "vel", 0, 100, 70, 112),
+    small = [("Octave", "octave", -1, 2, 0, 58), ("Poly", "poly", 1, 8, 8, 94), ("Velocity", "vel", 0, 100, 70, 112),
              ("InGain", "ingain", -24, 24, 0, 130)]
     nb = {}
     for name, jn, mn, mx, init, y in small:

@@ -16,7 +16,7 @@ var types = [], hues = [], hits = [], sent = [];
 var selApi = null, trackId = 0, selectedId = -1, sessionMode = 0, modeWatch = [];
 for (var i = 0; i < 64; i++) { types[i] = 0; hues[i] = 0; hits[i] = 0; sent[i] = -1; }
 
-var bootTask = new Task(boot, this);
+var bootTask = new Task(boot, this), bootTries = 0;
 bootTask.schedule(1500);
 
 // Push 2/3 palette: 1..25 = clip-colour hues, 122 white, 123 light grey, 124 dark grey,
@@ -40,9 +40,17 @@ function colorFor(p) {
     }
 }
 
+// the engine sends "pushboot" once Live is ready (live.thisdevice); the timer is a fallback
+function pushboot() { bootTask.cancel(); boot(); }
+
 function boot() {
+    if (started && trackId && selApi) { update(); return; }
     started = 1;
     findTrack();
+    if (!trackId) {
+        if (++bootTries < 20) bootTask.schedule(1000);
+        return;
+    }
     try {
         selApi = new LiveAPI(onSelected, "live_set view");
         selApi.property = "selected_track";

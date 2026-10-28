@@ -29,7 +29,7 @@ var BUF = (jsarguments.length > 1) ? String(jsarguments[1]) : "vochop_buf";
 var NV = 8;
 var MAXREC_MS = 60000;
 var NBINS = 420;
-var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84;
+var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84, OCT_MIN = -1, OCT_MAX = 2;
 
 // ---------------------------------------------------------------- params
 var P = {
@@ -69,7 +69,7 @@ var recording = 0, waitingDone = 0, recStartT = 0, recStopT = 0, recLocal = 0, a
 var pendingLoad = 0, inputSeen = 0;
 var takes = [], takeIdx = -1, lastState = "";
 var tempo = 120, scaleRoot = 0, scaleInts = [0, 2, 4, 5, 7, 9, 11];
-var bendSemis = 0, tempoApi = null, scaleApi = null;
+var bendSemis = 0, tempoApi = null, scaleApi = null, rootApi = null, songApi = null, trApi = null, trApiPath = "";
 var asrList = null, asrId = 0, asrState = "off", asr16 = [];   // AI words
 var seq = { res: 1, page: 0, steps: [], len: 8, pos: -1 };
 var recNotes = {}, recPending = [];
@@ -83,7 +83,7 @@ for (i = 0; i < NV; i++) voices[i] = { busy: 0, note: -1, held: 0, t: 0, relT: 0
 var recTask = new Task(function () { stopRecording(); }, this);
 var doneTask = new Task(function () { if (waitingDone) recdone(-1); }, this);
 var rechopTask = new Task(function () { if (feat) { segment(); refreshAll(); summary(); } }, this);
-var seqTask = new Task(seqTick, this);
+var seqTask = new Task(seqTick, this), tickSlot = -2, tickClip = null;
 var recTaskCheck = new Task(recCheck, this);
 
 // ---------------------------------------------------------------- utils
@@ -121,12 +121,15 @@ function start() {
     try {
         scaleApi = new LiveAPI(onScale, "live_set");
         scaleApi.property = "scale_intervals";
+        rootApi = new LiveAPI(onScale, "live_set");
+        rootApi.property = "root_note";
     } catch (e2) { }
     refreshScale();
     findTrack();
     announce();
     updateFx();
     outlet(2, "banks", "getcount");
+    outlet(1, "pushboot");
     inputsRefresh();
     if (!words.length && !pendingLoad) setStatus("Press REC and speak (pick AUDIO FROM first) - or drop audio");
     refreshAll();
@@ -198,7 +201,8 @@ function p(name, v) {
         case "ai":
             if (P.ai) {
                 if (asrState == "ready") { if (feat) sendAsr(); else setStatus("AI words on - record a phrase"); }
-                else if (asrState == "missing" || asrState == "error") installAsr();
+                else if (asrState == "missing") installAsr();
+                else if (asrState == "error") { setStatus("AI words: retrying..."); outlet(2, "node", "retry"); }
                 else { setStatus("AI words: starting speech engine..."); aistart(); }
             } else if (feat) { asrList = null; segment(); refreshAll(); summary(); }
             break;
@@ -254,7 +258,7 @@ function octup(v) { if (Number(v) === 0) return; shiftOct(1); }
 function octdown(v) { if (Number(v) === 0) return; shiftOct(-1); }
 function shiftOct(d) {
     if (P.layout == 1) {
-        P.octave = clamp(P.octave + d, -3, 3);
+        P.octave = clamp(P.octave + d, OCT_MIN, OCT_MAX);
         outlet(2, "setparam", "octave", P.octave);
         setInfo("Octave " + (P.octave > 0 ? "+" : "") + P.octave);
     } else {
@@ -872,7 +876,7 @@ function asrwords() {
         var w = String(a[k + 2]).toLowerCase();
         if (w.length) list.push({ t: Number(a[k]), l: Number(a[k + 1]), w: w });
     }
-    if (!list.length) { setStatus("AI heard no words - using acoustic chop"); return; }
+    if (!list.length) { asrList = []; setStatus("AI heard no words - using acoustic chop"); return; }
     asrList = list;
     segment(); refreshAll(); summary();
 }
@@ -1094,7 +1098,7 @@ function rc(row, col) { return row * 8 + col; }
 function keyNoteAt(row, col) {
     // in-key layout like Push: columns = scale steps, every row up = a 4th (3 steps)
     var n = scaleInts.length, d = col + 3 * row;
-    var base = HOME + scaleRoot + 12 * P.octave;
+    var base = HOME + scaleRoot + 12 * clamp(Math.round(P.octave), OCT_MIN, OCT_MAX);
     while (base < KEY0) base += 12;
     var note = base + Math.floor(d / n) * 12 + scaleInts[d % n];
     return note > 127 ? -1 : note;
@@ -1324,7 +1328,7 @@ function repeatMs() {
 }
 
 // word / rest pads: classic chopper (choke by default)
-function triggerChop(sl, n, vel, pads) {
+function triggerChop(sl, n, vel, pads, oneShot) {
     if (P.choke) {
         for (var c = 0; c < NV; c++) if (voices[c].busy && voices[c].chop) {
             killVoice(c);
@@ -1332,11 +1336,11 @@ function triggerChop(sl, n, vel, pads) {
             hitPads(voices[c].pad, 0);
         }
     }
-    var mode = [0, 0, 1, 3][clamp(Math.round(P.pads), 0, 3)];
+    var mode = oneShot ? 0 : [0, 0, 1, 3][clamp(Math.round(P.pads), 0, 3)];
     var semis = P.pitch + bendSemis, tune = null;
     var pt = ensurePitch(sl);
     if (P.atune > 0 && pt > 0) tune = { hz: mtof(nearestAllowed(pt + semis)), amt: P.atune };
-    startVoice(sl, n, vel, Math.pow(2, clamp(semis, -48, 48) / 12), mode, P.pads != 0, tune, pads, 1);
+    startVoice(sl, n, vel, Math.pow(2, clamp(semis, -48, 48) / 12), mode, !oneShot && P.pads != 0, tune, pads, 1);
 }
 
 // keys: the selected slice, tuned to the played note (nearest octave around C5-B5)
@@ -1397,6 +1401,8 @@ function vend(k) {
     k = Number(k);
     var v = voices[k];
     if (!v || !v.busy) return;
+    // a 'done' from the sound this voice played before a steal / retrigger can arrive late
+    if (now() - v.t < 25) return;
     v.busy = 0; v.held = 0;
     hitPads(v.pad, 0);
 }
@@ -1418,7 +1424,7 @@ function waveclick(f) {
     for (var k = 0; k < words.length; k++) if (s >= words[k].s && s < words[k].e) { pick = words[k]; break; }
     if (!pick) return;
     sel = pick;
-    triggerChop(pick, -999, 100, padOfSlice(pick));
+    triggerChop(pick, -999, 100, padOfSlice(pick), true);
     for (var q = 0; q < NV; q++) if (voices[q].note == -999) voices[q].held = 0;
     setInfo("Selected " + label(pick) + " - the keys play this word");
     sendUI();
@@ -1428,7 +1434,13 @@ function waveclick(f) {
 function trackApi() {
     if (!trackPath) findTrack();
     if (!trackPath) return null;
-    return new LiveAPI(null, trackPath);
+    if (!trApi || trApiPath != trackPath) { trApi = new LiveAPI(null, trackPath); trApiPath = trackPath; }
+    return trApi;
+}
+
+function song() {
+    if (!songApi) songApi = new LiveAPI(null, "live_set");
+    return songApi;
 }
 
 function clipAt(slotIdx) {
@@ -1497,8 +1509,7 @@ function getNotes(clip, fromPitch, span, fromTime, timeSpan) {
 function recArmed(clip) {
     try {
         if (Number(clip.get("is_recording")) == 1) return true;
-        var song = new LiveAPI(null, "live_set");
-        if (Number(song.get("session_record")) != 1) return false;
+        if (Number(song().get("session_record")) != 1) return false;
         var tr = trackApi();
         return tr && Number(tr.get("arm")) == 1 && Number(clip.get("is_playing")) == 1;
     } catch (e) { return false; }
@@ -1506,6 +1517,8 @@ function recArmed(clip) {
 
 function recOn(n, vel) {
     if (!trackPath) return;
+    // cheap check first: nothing to do unless Live is recording / overdubbing
+    try { if (Number(song().get("session_record")) != 1) return; } catch (e) { return; }
     var clip = targetClip(false);
     if (!clip || !recArmed(clip)) return;
     var pos = Number(clip.get("playing_position"));
@@ -1540,6 +1553,7 @@ function recCheck() {
 
 // ---- step sequencer
 function seqEnter() {
+    tickSlot = -2; tickClip = null;
     seqRefresh();
     seqTask.cancel();
     seqTask.interval = 80;
@@ -1573,8 +1587,8 @@ function seqToggle(i) {
     if (ex.length) {
         try { clip.call("remove_notes_extended", 0, KEY0, beat - 0.001, res); } catch (e) { }
     } else {
+        if (sel && sel.wi >= NWORDS) { setInfo("Only words 1-32 can go into a clip"); return; }
         var n = sel ? (sel.kind == "word" ? sel.wi : REST0 + sel.wi) : 0;
-        if (n >= KEY0) return;
         var steps = sel ? Math.max(1, Math.round((sel.e - sel.s) / sr * tempo / 60 / res)) : 1;
         addNotes(clip, [{ pitch: n, start_time: beat, duration: steps * res, velocity: 100, mute: 0 }]);
     }
@@ -1594,12 +1608,13 @@ function seqSetLen(beats) {
 
 function seqTick() {
     if (P.layout != 2) { seqTask.cancel(); return; }
-    var clip = null, pos = -1;
+    var pos = -1;
     try {
         var tr = trackApi();
-        if (tr) clip = clipAt(Number(tr.get("playing_slot_index")));
-        if (clip && Number(clip.get("is_playing")) == 1) pos = Number(clip.get("playing_position"));
-    } catch (e) { clip = null; }
+        var ps = tr ? Number(tr.get("playing_slot_index")) : -1;
+        if (ps != tickSlot) { tickSlot = ps; tickClip = ps >= 0 ? clipAt(ps) : null; }
+        if (tickClip && Number(tickClip.get("is_playing")) == 1) pos = Number(tickClip.get("playing_position"));
+    } catch (e) { tickSlot = -2; tickClip = null; }
     var st = -1;
     if (pos >= 0) {
         var gi = Math.floor(pos / SEQ_RES[seq.res]);
