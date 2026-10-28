@@ -29,7 +29,7 @@ var BUF = (jsarguments.length > 1) ? String(jsarguments[1]) : "vochop_buf";
 var NV = 8;
 var MAXREC_MS = 60000;
 var NBINS = 420;
-var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84, OCT_MIN = -1, OCT_MAX = 2;
+var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84, OCT_MIN = -1, OCT_MAX = 1;
 
 // ---------------------------------------------------------------- params
 var P = {
@@ -74,7 +74,7 @@ var asrList = null, asrId = 0, asrState = "off", asr16 = [];   // AI words
 var seq = { res: 1, page: 0, steps: [], len: 8, pos: -1 };
 var recNotes = {}, recPending = [];
 var inIO = null, inTypes = [], inChans = [];
-var trackPath = "";
+var trackPath = "", trackId = 0;
 
 var i;
 for (i = 0; i < 64; i++) { surf[i] = null; padNote[i] = -1; }
@@ -85,6 +85,7 @@ var doneTask = new Task(function () { if (waitingDone) recdone(-1); }, this);
 var rechopTask = new Task(function () { if (feat) { segment(); refreshAll(); summary(); } }, this);
 var seqTask = new Task(seqTick, this), tickSlot = -2, tickClip = null;
 var recTaskCheck = new Task(recCheck, this);
+var scaleTask = new Task(function () { refreshScale(); buildSurface(); sendUI(); }, this);
 
 // ---------------------------------------------------------------- utils
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
@@ -145,13 +146,12 @@ function onTempo(a) {
 
 function onScale(a) {
     if (!ready) return;
-    refreshScale();
-    buildSurface(); sendUI();
+    scaleTask.cancel(); scaleTask.schedule(50);
 }
 
 function refreshScale() {
     try {
-        var s = new LiveAPI(null, "live_set");
+        var s = song();
         var r = s.get("root_note");
         var iv = s.get("scale_intervals");
         if (r && r.length && !isNaN(Number(r[0]))) scaleRoot = Number(r[0]);
@@ -170,7 +170,7 @@ function findTrack() {
             tr = new LiveAPI(null, tr.unquotedpath + " canonical_parent");
             guard++;
         }
-        if (tr && String(tr.type) == "Track") trackPath = tr.unquotedpath;
+        if (tr && String(tr.type) == "Track") { trackPath = tr.unquotedpath; trackId = Number(tr.id); }
     } catch (e) { trackPath = ""; }
     return trackPath;
 }
@@ -203,7 +203,8 @@ function p(name, v) {
                 if (asrState == "ready") { if (feat) sendAsr(); else setStatus("AI words on - record a phrase"); }
                 else if (asrState == "missing") installAsr();
                 else if (asrState == "error") { setStatus("AI words: retrying..."); outlet(2, "node", "retry"); }
-                else { setStatus("AI words: starting speech engine..."); aistart(); }
+                else if (asrState == "off") { setStatus("AI words: starting speech engine..."); asrState = "starting"; aistart(); }
+                else setStatus("AI words: speech engine is still starting...");
             } else if (feat) { asrList = null; segment(); refreshAll(); summary(); }
             break;
         case "link":
@@ -832,7 +833,9 @@ function asrPieces(eDb, thr, lvl, hop) {
 
 function asrstatus() {
     var a = arrayfromargs(arguments), st = String(a[0]);
-    asrState = st;
+    // info / busy are transient: keep the engine state (starting / ready)
+    if (st == "busy") asrState = "ready";
+    else if (st != "info") asrState = st;
     var msg = a.slice(1).join(" ");
     if (st == "ready") { installing = 0; installWarn.cancel(); outlet(1, "ai", 2); if (P.ai) { setStatus("AI words ready" + (msg ? " - " + msg : "")); if (feat && !asrList) sendAsr(); } }
     else if (st == "missing") { outlet(1, "ai", 0); if (P.ai) installAsr(); }
@@ -1098,7 +1101,7 @@ function rc(row, col) { return row * 8 + col; }
 function keyNoteAt(row, col) {
     // in-key layout like Push: columns = scale steps, every row up = a 4th (3 steps)
     var n = scaleInts.length, d = col + 3 * row;
-    var base = HOME + scaleRoot + 12 * clamp(Math.round(P.octave), OCT_MIN, OCT_MAX);
+    var base = HOME + scaleRoot + 12 * P.octave;
     while (base < KEY0) base += 12;
     var note = base + Math.floor(d / n) * 12 + scaleInts[d % n];
     return note > 127 ? -1 : note;
@@ -1396,13 +1399,12 @@ function startVoice(sl, n, vel, rate, mode, keep, tune, pads, chop) {
     outlet(1, "play", frac(sl.s), frac(sl.e));
 }
 
-// end of a voice (gen~ done flag)
-function vend(k) {
+// end of a voice: "vend <voice> <trigger id>" (a late 'done' of a stolen note is ignored)
+function vend(k, id) {
     k = Number(k);
     var v = voices[k];
     if (!v || !v.busy) return;
-    // a 'done' from the sound this voice played before a steal / retrigger can arrive late
-    if (now() - v.t < 25) return;
+    if (id !== undefined && Number(id) != v.trig) return;
     v.busy = 0; v.held = 0;
     hitPads(v.pad, 0);
 }
@@ -1431,10 +1433,12 @@ function waveclick(f) {
 }
 
 // ---------------------------------------------------------------- clips
+// the track is followed by id, its path is read fresh (tracks can be inserted / moved)
 function trackApi() {
-    if (!trackPath) findTrack();
-    if (!trackPath) return null;
-    if (!trApi || trApiPath != trackPath) { trApi = new LiveAPI(null, trackPath); trApiPath = trackPath; }
+    if (!trackId) findTrack();
+    if (!trackId) return null;
+    if (!trApi) trApi = new LiveAPI(null, "id " + trackId);
+    trackPath = String(trApi.unquotedpath || trackPath);
     return trApi;
 }
 
@@ -1444,7 +1448,7 @@ function song() {
 }
 
 function clipAt(slotIdx) {
-    if (slotIdx < 0) return null;
+    if (slotIdx < 0 || !trackPath) return null;
     var cs = new LiveAPI(null, trackPath + " clip_slots " + slotIdx);
     if (Number(cs.get("has_clip")) != 1) return null;
     return new LiveAPI(null, trackPath + " clip_slots " + slotIdx + " clip");
@@ -1506,19 +1510,18 @@ function getNotes(clip, fromPitch, span, fromTime, timeSpan) {
 }
 
 // ---- recording pad presses into the clip (pads taken over by VoChop never reach the track)
+// the track is armed (checked by the caller): the clip records, or Session Record overdubs it
 function recArmed(clip) {
     try {
         if (Number(clip.get("is_recording")) == 1) return true;
-        if (Number(song().get("session_record")) != 1) return false;
-        var tr = trackApi();
-        return tr && Number(tr.get("arm")) == 1 && Number(clip.get("is_playing")) == 1;
+        return Number(song().get("session_record")) == 1 && Number(clip.get("is_playing")) == 1;
     } catch (e) { return false; }
 }
 
 function recOn(n, vel) {
-    if (!trackPath) return;
-    // cheap check first: nothing to do unless Live is recording / overdubbing
-    try { if (Number(song().get("session_record")) != 1) return; } catch (e) { return; }
+    // cheap check first: Live only records into an armed track
+    var tr = null;
+    try { tr = trackApi(); if (!tr || Number(tr.get("arm")) != 1) return; } catch (e) { return; }
     var clip = targetClip(false);
     if (!clip || !recArmed(clip)) return;
     var pos = Number(clip.get("playing_position"));

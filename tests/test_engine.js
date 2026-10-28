@@ -92,4 +92,10 @@ assert.deepStrictEqual(Array.from(ctx.syllables("vrijeme")), ["vri", "je", "me"]
 assert.deepStrictEqual(Array.from(ctx.syllables("svima")), ["svi", "ma"]);
 assert.strictEqual(ctx.restText("svima", 0.5), "ma");
 assert.strictEqual(ctx.restText("pozdrav", 0.45), "drav");
+// ---- voice end: a stale "done" (old trigger id) is ignored, the current one frees the voice
+take(); ctx.p("page", 0); ctx.p("layout", 1); ctx.padclick(56, 100);
+const vi = vm0().find((m) => m[1] === "g" && m[2] === "trig");
+ctx.vend(vi[0], vi[3] - 1); assert.strictEqual(ctx.voices[vi[0]].busy, 1, "stale done ignored");
+ctx.vend(vi[0], vi[3]); assert.strictEqual(ctx.voices[vi[0]].busy, 0, "done frees voice");
+ctx.padclick(56, 0);
 console.log("engine tests OK");

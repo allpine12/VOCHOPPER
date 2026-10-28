@@ -141,9 +141,9 @@ def gen_voice_patcher():
     G = Patch()
     gin = G.obj("in 1", 20, 20, 0, 1, [""])
     cb = G.add({"maxclass": "codebox", "code": code, "fontface": 0, "fontname": "<Monospaced>", "fontsize": 12.0,
-                "numinlets": 1, "numoutlets": 11, "outlettype": [""] * 11, "patching_rect": [20, 60, 700, 600]})
+                "numinlets": 1, "numoutlets": 12, "outlettype": [""] * 12, "patching_rect": [20, 60, 700, 600]})
     G.con(gin, 0, cb, 0)
-    for k in range(11):
+    for k in range(12):
         o = G.obj("out %d" % (k + 1), 20 + k * 60, 700, 1, 0, [])
         G.con(cb, k, o, 0)
     p = G.patcher([100.0, 100.0, 800.0, 800.0], presentation=False)
@@ -378,7 +378,7 @@ def build_instrument():
     params.append((rev, "reverse"))
     pads = menu(P, "Pads", 1420, 300, (CX, 40, 56, 15), ["One-Shot", "Gate", "Loop", "Repeat"], init=0)
     params.append((pads, "pads"))
-    small = [("Octave", "octave", -1, 2, 0, 58), ("Poly", "poly", 1, 8, 8, 94), ("Velocity", "vel", 0, 100, 70, 112),
+    small = [("Octave", "octave", -1, 1, 0, 58), ("Poly", "poly", 1, 8, 8, 94), ("Velocity", "vel", 0, 100, 70, 112),
              ("InGain", "ingain", -24, 24, 0, 130)]
     nb = {}
     for name, jn, mn, mx, init, y in small:
@@ -428,7 +428,7 @@ def build_instrument():
         y = 1340
         vrt = P.obj("route g t r c pn", x, y, 1, 6, [""] * 6, w=160)
         P.con(vr, v, vrt, 0)
-        gen = P.obj("gen~", x, y + 40, 1, 11, ["signal"] * 11, w=380, patcher=json.loads(json.dumps(gp)))
+        gen = P.obj("gen~", x, y + 40, 1, 12, ["signal"] * 12, w=380, patcher=json.loads(json.dumps(gp)))
         P.con(vrt, 0, gen, 0)
         heads = []
         for h in range(5):
@@ -454,10 +454,13 @@ def build_instrument():
         P.con(rt, 0, pL, 0); P.con(rt, 0, pR, 0)
         P.con(pnu, 0, pL, 1); P.con(pnu, 1, pR, 1)
         P.con(pL, 0, mixL, 0); P.con(pR, 0, mixR, 0)
+        # done pulse -> read the id of the note that finished -> "vend <voice> <id>"
         ed = P.obj("edge~", x + 300, y + 90, 1, 2, ["bang", "bang"])
         P.con(gen, 10, ed, 0)
-        ve = P.msg("vend %d" % v, x + 300, y + 120)
-        P.con(ed, 0, ve, 0); P.con(ve, 0, js, 0)
+        snp = P.obj("snapshot~", x + 300, y + 120, 2, 1, ["float"])
+        P.con(gen, 11, snp, 0); P.con(ed, 0, snp, 0)
+        ve = P.obj("prepend vend %d" % v, x + 300, y + 150, 1, 1, [""], w=100)
+        P.con(snp, 0, ve, 0); P.con(ve, 0, js, 0)
     # retune~ starts bypassed in every voice
     loadrt = P.msg("0", 1500, 1300)
     P.con(tbbb, 1, loadrt, 0)

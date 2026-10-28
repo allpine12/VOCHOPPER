@@ -35,6 +35,7 @@ History g3p(0.5);
 History g3s(0);
 History g4p(0.75);
 History g4s(0);
+History ldone(0);
 
 msps = 1000 / samplerate;
 done = 0;
@@ -192,4 +193,8 @@ out7 = g3s + g3p * g * spd;
 out8 = w3 * ga;
 out9 = g4s + g4p * g * spd;
 out10 = w4 * ga;
+if (done > 0.5) {
+	ldone = trig;
+}
 out11 = done;
+out12 = ldone;

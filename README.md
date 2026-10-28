@@ -51,7 +51,7 @@ Push se vraća na svoje. Gumb **PUSH PADS** to potpuno isključuje.
 | **Words** | Cijeli grid su riječi: 4 para redova = 32 riječi (riječ + drugi dio). |
 
 U Notes/Seq gornja dva reda pokazuju 8 riječi. **Page** (ili Octave tipke na Pushu u Words/Seq) prebacuje na riječi 9–16, 17–24, 25–32.
-U Notes layoutu Octave tipke na Pushu mijenjaju oktavu klavijature.
+U Notes layoutu Octave tipke na Pushu mijenjaju oktavu klavijature (-1, 0, +1).
 
 **Gumbi iznad ekrana** (Push banke parametara): `Rec · Undo · Layout · Page · Oct- · Oct+ · Keys · Choke`.
 Undo vraća prethodni take. Ekran pokazuje banke **Main** (Layout, Keys, AutoTune, Key, Pitch, Attack, Release, Volume),

@@ -12,7 +12,7 @@ body.replace(/(^|[;{}\s])([a-z_]\w*)\s*=(?!=)/gi, (m, a, n) => { if (!(n in para
 body = body.replace(/\b([a-z_]\w*)\b/gi, (m) => (m in hist ? "H." + m : m in params ? "Pm." + m : m));
 body = body.replace(/\bnoise\(\)/g, "(Math.random()*2-1)").replace(/\b(cos|min|max|abs|floor)\(/g, "Math.$1(").replace(/\bsamplerate\b/g, "SR");
 const fn = new Function("H", "Pm", "SR", "var " + Array.from(locals).join(",") + ";" + body +
-  "; return [out1,out2,out3,out4,out5,out6,out7,out8,out9,out10,out11];");
+  "; return [out1,out2,out3,out4,out5,out6,out7,out8,out9,out10,out11,out12];");
 function voice() { return { H: Object.assign({}, hist), Pm: Object.assign({}, params) }; }
 function run(v, n, SR) { const o = []; for (let i = 0; i < n; i++) o.push(fn(v.H, v.Pm, SR)); return o; }
 const SR = 44100;
@@ -22,6 +22,7 @@ let v = voice(); Object.assign(v.Pm, { s0: 100, s1: 300, cs0: 150, cs1: 250, mod
 let o = run(v, Math.round(SR * 0.25), SR);
 const doneAt = o.findIndex((x) => x[10] == 1);
 assert(Math.abs(doneAt / SR * 1000 - 200) < 2, "one-shot length 200 ms, got " + doneAt / SR * 1000);
+assert.strictEqual(o[doneAt][11], 1, "done carries the trigger id");
 assert(Math.abs(o[Math.round(SR * 0.1)][0] - 200) < 1, "position advances 1 ms per ms");
 assert(o[Math.round(SR * 0.1)][1] > 0.99, "full gain mid-slice");
 // cloud: starts with the direct head, then grains take over and it keeps sounding

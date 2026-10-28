@@ -68,8 +68,13 @@ async function ensureModel() {
   }
 }
 
-let reportedMissing = false;
+let reportedMissing = false, booting = false;
 async function boot() {
+  booting = true;
+  try { await bootInner(); } finally { booting = false; }
+}
+
+async function bootInner() {
   let sherpa;
   try {
     sherpa = require("sherpa-onnx-node");
@@ -152,7 +157,10 @@ if (maxApi) {
   maxApi.addHandler("asrbegin", handleBegin);
   maxApi.addHandler("asrchunk", handleChunk);
   maxApi.addHandler("asrgo", handleGo);
-  maxApi.addHandler("retry", () => { if (!recognizer) boot(); });
+  maxApi.addHandler("retry", () => {
+    if (recognizer) status("ready", "");        // engine is fine: VoChop re-sends the audio
+    else if (!booting) boot();
+  });
   boot();
 }
 

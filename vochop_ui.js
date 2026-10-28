@@ -58,6 +58,8 @@ function selpad(p) { selPad = Number(p); mgraphics.redraw(); }
 function rec(v) { recOn = v; mgraphics.redraw(); }
 function ai(v) { aiState = v; mgraphics.redraw(); }
 function refresh() { mgraphics.redraw(); }
+function pushboot() { }
+function anything() { }
 function bang() { mgraphics.redraw(); }
 
 // ---------------------------------------------------------------- geometry
