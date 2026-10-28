@@ -1094,7 +1094,7 @@ function rc(row, col) { return row * 8 + col; }
 function keyNoteAt(row, col) {
     // in-key layout like Push: columns = scale steps, every row up = a 4th (3 steps)
     var n = scaleInts.length, d = col + 3 * row;
-    var base = 72 + scaleRoot + 12 * P.octave;
+    var base = HOME + scaleRoot + 12 * P.octave;
     while (base < KEY0) base += 12;
     var note = base + Math.floor(d / n) * 12 + scaleInts[d % n];
     return note > 127 ? -1 : note;
@@ -1271,7 +1271,7 @@ function noteOff(n) {
         if (v.busy && v.note == n && v.held) {
             v.held = 0;
             if (v.keep) {
-                voiceMsg(k, "gate", 0);
+                voiceMsg(k, "hold", 0);
                 v.relT = t;
                 hitPads(v.pad, 0);
             }
@@ -1375,7 +1375,7 @@ function startVoice(sl, n, vel, rate, mode, keep, tune, pads, chop) {
     voiceMsg(vi, "s1", s1);
     voiceMsg(vi, "cs0", ms(cr[0]));
     voiceMsg(vi, "cs1", ms(cr[1]));
-    voiceMsg(vi, "rate", rate);
+    voiceMsg(vi, "spd", rate);
     voiceMsg(vi, "mode", mode);
     voiceMsg(vi, "rev", (P.reverse && chop) ? 1 : 0);
     voiceMsg(vi, "amp", amp);
@@ -1384,7 +1384,7 @@ function startVoice(sl, n, vel, rate, mode, keep, tune, pads, chop) {
     voiceMsg(vi, "gsz", clamp(P.grain, 20, 500));
     voiceMsg(vi, "rlen", Math.max(15, repeatMs() * rate));
     voiceMsg(vi, "fade", mode == 0 ? 5 : 3);
-    voiceMsg(vi, "gate", 1);
+    voiceMsg(vi, "hold", 1);
     v.trig++;
     voiceMsg(vi, "trig", v.trig);
     v.busy = 1; v.note = n; v.held = 1; v.t = now(); v.relT = 0; v.keep = keep ? 1 : 0; v.pad = pads; v.chop = chop;
@@ -1727,7 +1727,7 @@ function chsel(idx) {
 }
 
 function pushstate(v) {
-    setStatus(Number(v) ? "Push pads: VoChop layout (select another track to give them back)" : "Push pads released");
+    setInfo(Number(v) ? "Push pads: VoChop layout (select another track to give them back)" : "Push pads back to Push");
 }
 
 function anything() {

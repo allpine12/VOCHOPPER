@@ -8,13 +8,13 @@ Param s0(0);
 Param s1(0);
 Param cs0(0);
 Param cs1(0);
-Param rate(1);
+Param spd(1);
 Param mode(0);
 Param rev(0);
 Param amp(0);
 Param att(2);
 Param rel(200);
-Param gate(0);
+Param hold(0);
 Param gsz(120);
 Param rlen(100);
 Param fade(4);
@@ -43,7 +43,7 @@ w1 = 0;
 w2 = 0;
 w3 = 0;
 w4 = 0;
-edge = 0;
+ew = 0;
 lo = 0;
 hi = 0;
 g = max(20, gsz);
@@ -74,7 +74,7 @@ if (kill != lkill) {
 
 // amplitude envelope (attack / release in ms, kill = 5 ms fade)
 tgt = 0;
-if (active > 0.5 && gate > 0.5 && killing < 0.5) {
+if (active > 0.5 && hold > 0.5 && killing < 0.5) {
 	tgt = 1;
 }
 up = msps / max(0.05, att);
@@ -88,18 +88,18 @@ if (env < tgt) {
 	env = max(tgt, env - dn);
 }
 
-step = rate * msps;
+stp = spd * msps;
 fd = max(0.5, fade);
 
 if (active > 0.5) {
 	if (mode < 0.5) {
 		// one-shot (forward or reverse)
-		edge = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
-		w0 = max(0, edge);
+		ew = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
+		w0 = max(0, ew);
 		if (rev > 0.5) {
-			pos = pos - step;
+			pos = pos - stp;
 		} else {
-			pos = pos + step;
+			pos = pos + stp;
 		}
 		if (pos > s1 || pos < s0) {
 			active = 0;
@@ -112,35 +112,35 @@ if (active > 0.5) {
 		if (mode > 2.5) {
 			hi = min(s1, s0 + max(5, rlen));
 		}
-		edge = min(1, min((pos - lo) / fd, (hi - pos) / fd));
-		w0 = max(0, edge);
+		ew = min(1, min((pos - lo) / fd, (hi - pos) / fd));
+		w0 = max(0, ew);
 		if (rev > 0.5) {
-			pos = pos - step;
+			pos = pos - stp;
 			if (pos < lo) {
 				pos = hi - (lo - pos);
 			}
 		} else {
-			pos = pos + step;
+			pos = pos + stp;
 			if (pos > hi) {
 				pos = lo + (pos - hi);
 			}
 		}
 	} else {
 		// cloud: play the word from its start, then cross into grains on the vowel
-		edge = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
-		w0 = max(0, edge) * (1 - xf);
+		ew = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
+		w0 = max(0, ew) * (1 - xf);
 		if (pos < s1) {
-			pos = pos + step;
+			pos = pos + stp;
 		}
-		if (stage < 0.5 && pos >= cs1 - 40 * rate) {
+		if (stage < 0.5 && pos >= cs1 - 40 * spd) {
 			stage = 1;
 		}
 		if (stage > 0.5) {
 			xf = min(1, xf + msps / 60);
 			region = max(0, cs1 - cs0);
-			g = min(max(20, gsz), max(20, region / max(0.25, rate)));
+			g = min(max(20, gsz), max(20, region / max(0.25, spd)));
 			inc = msps / g;
-			span = max(0, region - g * rate);
+			span = max(0, region - g * spd);
 			g1p = g1p + inc;
 			if (g1p >= 1) {
 				g1p = g1p - 1;
@@ -177,12 +177,12 @@ if (active > 0.5) {
 ga = env * amp;
 out1 = pos;
 out2 = w0 * ga;
-out3 = g1s + g1p * g * rate;
+out3 = g1s + g1p * g * spd;
 out4 = w1 * ga;
-out5 = g2s + g2p * g * rate;
+out5 = g2s + g2p * g * spd;
 out6 = w2 * ga;
-out7 = g3s + g3p * g * rate;
+out7 = g3s + g3p * g * spd;
 out8 = w3 * ga;
-out9 = g4s + g4p * g * rate;
+out9 = g4s + g4p * g * spd;
 out10 = w4 * ga;
 out11 = done;

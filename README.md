@@ -1,122 +1,112 @@
-# VoChop: a vocal chopper for Ableton Live 12 + Push 3
+# VoChop: vokalni chopper za Ableton Live 12 + Push 3
 
-Record a phrase and VoChop chops it into **words** right away, then splits each
-word into **parts** (syllables, e.g. *every → ev · ery*). Everything lands on an
-8×8 pad grid you can play polyphonically from Push 3, any MIDI keyboard, or the
-on-screen grid with your mouse.
+Snimiš frazu i VoChop je odmah izreže na **riječi**, a svaku riječ na 1–3 **dijela** (slogove).
+Riječi sviraš kao chopove ili kao instrument: odabereš riječ i odsviraš akord, a riječ se
+autotuneom spegla u te note i i dalje se razumije.
 
 ```
 VoChop/
-  VoChop.amxd          <- instrument (MIDI track)   - the chopper/sampler
-  VoChop Input.amxd    <- audio effect (mic track)  - records your voice into VoChop
-  vochop*.js           <- device code (must stay in the same folder as the .amxd files)
-  vochop_asr_model/    <- offline speech model for AI WORDS (English, 28 MB)
-  package.json         <- lets AI WORDS install its speech engine
-  source/              <- generator + plain .maxpat copies
+  VoChop.amxd          <- instrument (MIDI traka). Jedini koji ti treba.
+  VoChop Input.amxd    <- rezerva: samo ako AUDIO FROM ne radi na tvom sustavu
+  vochop*.js           <- kod devicea (mora ostati u istom folderu kao .amxd)
+  package.json         <- AI WORDS si s ovim instalira speech engine
+  source/              <- generator (gen.py), gen~ kod glasa, .maxpat kopije
+  tests/               <- testovi (Node), nisu potrebni za rad
 ```
 
-**Keep the whole folder together.** Put it somewhere permanent, e.g.
-`Music/Ableton/User Library/VoChop/`. The devices load their scripts from this folder, and
-your recorded takes are saved here as WAV files.
+**Cijeli folder drži zajedno** na stalnom mjestu, npr. `Music/Ableton/User Library/VoChop/`.
+Takeovi se spremaju kao WAV u isti folder.
+
+Preuzimanje s GitHuba: zeleni gumb **Code → Download ZIP**, raspakiraj i preimenuj folder u `VoChop`.
 
 ---
 
-## 1. Setup (2 minutes)
+## 1. Postavljanje
 
-1. **MIDI track:** drag `VoChop.amxd` onto a MIDI track.
-2. **Mic track:** drag `VoChop Input.amxd` onto the audio track your microphone comes in on.
-   Set that track's **Monitor to "In"**, so the device receives audio even when the track isn't armed.
-   Both devices show **Link 1** by default, which means they're paired. Use Link 2–4 for more pairs.
-3. Press **REC** (on either device), say or sing a phrase, and press **REC** again.
-   Within about 0.1 s the pads light up: one colour per word.
-   *Or skip recording:* drag any audio file or clip onto the **DROP** box.
-4. Click pads on the device to check the chop. Click the **top** of a pad for louder hits and the **bottom** for softer ones,
-   or Shift-click for full velocity. You can drag across pads to play them in a run.
-   **BIG VIEW** opens a large 8×8 window with the word text on every pad.
+1. Povuci `VoChop.amxd` na **MIDI traku**.
+2. U deviceu, u izborniku **AUDIO FROM** (ispod REC) odaberi odakle dolazi mikrofon: `Ext. In`
+   (pa kanal desno, npr. `1`) ili neku audio traku. Nikakva dodatna traka ni device nisu potrebni.
+3. Pritisni **REC**, reci frazu, pa opet **REC**. Za ~0,1 s padovi se upale, svaka riječ u svojoj boji.
+   - **AUTO**: snimanje krene kad počneš govoriti i stane nakon 1,5 s tišine (prag = dial *Thresh*).
+   - **THRU**: čuješ mikrofon kroz VoChop.
+   - Možeš i povući audio fajl ili clip na **DROP**.
+4. Ako AUDIO FROM ostane prazan ili ne snima, tvoja verzija Livea ne daje instrumentima audio ulaz.
+   Tada stavi `VoChop Input.amxd` na audio traku s mikrofonom (Monitor: In). Oba devicea moraju imati isti **Link**.
 
-## 2. Push 3 (controlled mode)
+## 2. Push 3
 
-VoChop listens to plain MIDI notes, so Push needs a layout where every pad has its own note:
+Kad odabereš VoChop traku, Push padovi automatski prelaze u VoChop raspored. Čim odeš na drugu traku,
+Push se vraća na svoje. Gumb **PUSH PADS** to potpuno isključuje.
 
-1. Select the VoChop track (Push plays the selected track).
-2. On Push press **Layout/Scale** → set **Chromatic** (In Key **off**) and layout **Sequential ↑**
-   (Push 3 calls it *Sequent ^*).
-3. Click **LEARN** on VoChop, then press the **bottom-left pad** on Push. Done:
-   every pad now matches the grid on screen.
+**Gornja dva reda uvijek su riječi:**
+- 1. red (gore): cijela riječ, npr. `svima`
+- 2. red: drugi dio riječi, npr. `-ma`
 
-Push's encoders control the device parameters (pitch, filter, delay and so on) like any other device.
+**Ispod toga je layout** (gumb *Layout* iznad ekrana ili izbornik na deviceu):
 
-**PUSH PADS (beta):** turns your Push pads into VoChop's colours. Words light up in their colour
-and parts in grey. It takes over the pad matrix through Live's control-surface API, and
-switching it off gives the pads back. It's marked beta because I couldn't test it on real hardware.
-If the colours look wrong, leave it off. The note method above always works.
-
-## 3. How the pads are laid out
-
-| Mode | Layout |
+| Layout | Donjih 6 redova |
 |---|---|
-| **Words + Parts** (default) | Each **column is a word**. The **top pad = the whole word**; the pads **below it = its parts**. 9–16 words: the grid splits into a top half (words 1–8) and a bottom half (words 9–16) |
-| **Syllables** | Every part in reading order (top-left → right, row by row), up to 64 |
-| **Word List** | Every word in reading order, up to 64 (for long phrases) |
-| **Keys** | Plays **one** slice chromatically across all pads. Pick the slice by tapping its pad first, or by clicking it on the waveform. With **TUNE** on (the default), pitch is set from the slice's detected pitch, so the pads play *real notes* (C3 plays C3) |
+| **Notes** (default) | Klavijatura u ljestvici Live seta (kao Push, kvarte). Svira **odabranu riječ** na toj noti. Akord = riječ u akordu. |
+| **Seq** | Step sequencer u clip: redovi 3–6 = 32 koraka, red 7 = stranice, red 8 = rezolucija (1/32–1/4) i duljina clipa (1–8 taktova). Klikneš riječ gore, pa korak gdje će stajati. |
+| **Words** | Cijeli grid su riječi: 4 para redova = 32 riječi (riječ + drugi dio). |
 
-## 4. AI WORDS: chopping by real words
+U Notes/Seq gornja dva reda pokazuju 8 riječi. **Page** (ili Octave tipke na Pushu u Words/Seq) prebacuje na riječi 9–16, 17–24, 25–32.
+U Notes layoutu Octave tipke na Pushu mijenjaju oktavu klavijature.
 
-There are two chopping engines:
+**Gumbi iznad ekrana** (Push banke parametara): `Rec · Undo · Layout · Page · Oct- · Oct+ · Keys · Choke`.
+Undo vraća prethodni take. Ekran pokazuje banke **Main** (Layout, Keys, AutoTune, Key, Pitch, Attack, Release, Volume),
+**FX** (Reverb, Size, Delay, Time, Feedback, Crush, Drive, Cutoff) i **Chop**.
 
-* **Instant (always on):** acoustic analysis of pauses and loudness valleys, done in about 30–80 ms. It's very good at
-  parts and syllables. For *words* it works best when you leave small gaps between them, because in fast
-  speech the gap inside "wel-come" can look like a gap between two words.
-  The **Words** and **Syllables** knobs control how eagerly it splits.
-* **AI WORDS (one click):** offline speech recognition (sherpa-onnx, Apache-2.0) figures out *which*
-  gaps are real word boundaries, and the acoustic engine snaps each cut to the exact sample. The pads
-  then show the **actual words** ("every", "one", …). In my tests this improved word-boundary accuracy from 69% to
-  90% (F1) and took about 50 ms per phrase. Everything runs on your computer and no audio is uploaded.
-  The model is English-only.
-  * The **first time** you switch it on, it installs the speech engine (about 35 MB from npm, 1–3 minutes,
-    one time only). The status line shows progress. The model itself is already in the folder.
-  * If the install hangs (e.g. your Max has no npm), open Terminal in the VoChop folder and run
-    `npm install`, then toggle AI WORDS off and on again.
+**Snimanje u clip:** naoružaj traku i snimaj kao inače (Session Record). Što odsviraš na Push padovima upisuje se u clip.
+Note u clipu znače:
 
-## 5. Controls
+| Nota | Što svira |
+|---|---|
+| 0–31 (C-2…G0) | riječi 1–32 |
+| 32–63 (G#0…D#3) | drugi dio riječi 1–32 |
+| 64–127 | odabrana riječ na toj visini. C5–B5 = najbliža oktava glasu, svaka oktava gore/dolje = ±12 |
 
-**Left:** `REC` · `DROP` (audio file/clip) · `Mode` · `Trigger` (One-Shot / Gate / Loop) · `LEARN` + `Base` note ·
-`<` `>` previous/next **take** (every recording is kept as a WAV) · `BIG VIEW` · `MAKE CLIP` ·
-`AI WORDS` · `PUSH PADS` · `Link`
+Nota riječi ujedno **odabire** riječ, pa se u clipu snima i koju si riječ svirao.
+**MAKE CLIP** napravi clip u kojem su sve riječi fraze redom.
 
-**MAKE CLIP** writes a MIDI clip into the first empty slot of the VoChop track that replays your phrase as
-pad hits, quantised to 1/16 at the current tempo. Fire it, then rearrange the notes to remix your words.
+## 3. Zvuk
 
-**Play:** Pitch (±24 st) · Attack · Release · Spread (stereo voice spread) · Poly (1–8 voices) · Velocity
-sensitivity · **Stutter** (tempo-synced repeat while you hold a pad: 1/4 … 1/16T)
+- **Keys** (kako note na klavijaturi drže zvuk):
+  - **Cloud** (default): riječ krene normalno, pa se na samoglasniku pretvori u mekani granularni sustain dok držiš tipku.
+    Veličina zrna = dial **Grain**.
+  - **Loop**: cijela riječ u petlji.
+  - **Repeat**: ponavlja početak riječi u ritmu (**Rate**: 1/4…1/16T).
+  - **One-Shot**: odsvira jednom.
+- **Pads** (kako sviraju riječi): One-Shot · Gate · Loop · Repeat. **CHOKE** je uključen: nova riječ prekida prethodnu.
+- **AutoTune** 0–100: na riječima ih ispegla u notu. Na 100 % je glas savršeno autotuneovan, a riječ se i dalje razumije.
+  **Key**: *Scale* = ljestvica Live seta, ili jedna nota (C…B). Note na klavijaturi su uvijek 100 % ugođene.
+- FX: Filter (LP/HP/BP) + Cutoff/Reso · Crush · Drive · ping-pong **Delay** (Time, Feedback) · **Reverb** (Size) · Volume.
+- Ostalo: Pitch (±24), Attack, Release, Spread, Poly (1–8 glasova), Velocity, Reverse, In dB (ulazno pojačanje).
 
-**FX:** Filter (Off/LP/HP/BP) + Cutoff + Reso · Crush (bit/rate) · Drive (tanh saturation) ·
-**Ping-pong delay** (Delay amount, tempo-synced Time, Feedback) · **Reverb** (amount + Size) · Volume
+## 4. Rezanje i AI WORDS
 
-**Toggles:** `REVERSE` · `SNAP` (nudges every slice to the nearest note of Live 12's current **Scale**, for
-in-key chops) · `TUNE` (Keys mode follows detected pitch) · `CHOKE` (a new hit cuts the previous one, classic chop
-style)
+- **Bez AI-ja** (uvijek uključeno, ~50 ms): VoChop traži stanke i doline glasnoće.
+  Klikovi, udisaji i šum prije prve riječi se odbacuju, a početak svake riječi traži se točno na sampleu.
+  **Words** dial: lijevo = manje riječi, desno = više. **Syllables** dial: koliko lako dijeli na slogove.
+- **AI WORDS** (dodatna opcija): offline prepoznavanje govora (NVIDIA Parakeet v3, 25 jezika, **i hrvatski**).
+  Jezik prepoznaje sam. Pronađe granice riječi i napiše riječi na padove (`pozdrav`, `svima`, …).
+  - Prvo uključivanje jednokratno instalira engine (npm, 1–3 min) i skida model (~670 MB). Status pokazuje postotak.
+  - Na mojim testovima: bez AI-ja F1 granica riječi ≈ 0,81, s AI-jem ≈ 0,91. Broj riječi je s AI-jem gotovo uvijek točan.
+  - Sve se vrti na tvom računalu, ništa se ne šalje van.
+  - Ako instalacija zapne (npr. nemaš npm), u Terminalu u VoChop folderu pokreni `npm install`, pa isključi i uključi AI WORDS.
 
-**VoChop Input:** `REC` · `AUTO` (arms; recording starts when you speak and stops after 1.5 s of silence) ·
-`Gain` · `Thresh` (level for AUTO) · `THRU` (pass the mic through) · `Link`
+## 5. Problemi
 
-## 6. Troubleshooting
+- **AUDIO FROM je prazan / snimka je tišina:** koristi `VoChop Input.amxd` (vidi 1.4). Max konzola ispisuje `VoChop: device audio inputs: N`. Ta poruka mi pomaže ako mi je pošalješ.
+- **Push padovi se ne prebace:** provjeri da je PUSH PADS uključen i da je odabrana VoChop traka. Push mora biti spojen na komp.
+- **Boje na Pushu izgledaju krivo:** javi, paleta je podešena bez stvarnog hardvera.
+- **Gumbi iznad ekrana ne pokazuju Rec/Undo…:** u deviceu su isti gumbi (REC, UNDO, OCT -/+, Layout, Keys, CHOKE).
+- **"js: can't find file":** `.js` fajlovi moraju biti uz `.amxd`. Kopiraj cijeli folder pa ponovno učitaj device.
+- **Live ne želi otvoriti .amxd:** u Liveu napravi prazan *Max Instrument*, klikni Edit, otvori `source/VoChop.maxpat`,
+  sve kopiraj u prazan device i spremi ga uz `.js` fajlove.
 
-* **"Nothing recorded"**: VoChop Input isn't receiving audio. Check that the mic track's input is right and that Monitor is set to **In**,
-  and that both devices use the same **Link** number.
-* **Pads don't match Push**: redo LEARN (Push layout must be Chromatic + Sequential).
-* **Grid is blank or "js: can't find file"**: the `.js` files must sit next to the `.amxd` files. Re-copy the whole
-  folder, then reload the device.
-* **Too many / too few words**: turn the **Words** knob (left = fewer, right = more), or switch on AI WORDS.
-* **Too many / too few parts**: turn the **Syllables** knob.
-* **Takes don't come back after reopening the set**: the WAVs are in the VoChop folder. If you moved the folder,
-  just drag the WAV back onto DROP.
-* **If Live refuses to open an .amxd** (corrupt device message): in Live, create an empty *Max Instrument*,
-  click its edit button, open `source/VoChop.maxpat` in Max, select all, copy, paste into the empty device, and
-  save it next to the .js files. Do the same with `source/VoChop Input.maxpat` and a *Max Audio Effect*.
+## 6. Za developere
 
-## 7. Notes
-
-* Mono recording, up to 60 s per take, 8 voices, sample-accurate playback with click-free fades.
-* Pitch detection uses YIN per slice. Snap and Tune change pitch the classic sampler way, so playback speed changes too.
-* Licences: speech engine sherpa-onnx (Apache-2.0); model icefall zipformer small-en (Apache-2.0).
+- `python3 source/gen.py` iz koda generira oba `.amxd` (i `.maxpat` kopije). Glas je gen~ codebox: `source/voice.genexpr`.
+- Testovi (Node 18+, bez Maxa): `node tests/sim_voice.js` · `node tests/test_engine.js fraza.wav` · `node tests/eval_chop.js <korpus>`.
+- Licence: sherpa-onnx (Apache-2.0), NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0).
