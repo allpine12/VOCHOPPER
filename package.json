@@ -1,0 +1,9 @@
+{
+  "name": "vochop-ai-words",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline speech engine for VoChop AI WORDS (installed automatically by the device)",
+  "dependencies": {
+    "sherpa-onnx-node": "1.13.8"
+  }
+}

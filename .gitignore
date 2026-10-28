@@ -1,0 +1,4 @@
+node_modules/
+vochop_asr_model/
+VoChop_take_*.wav
+.DS_Store
