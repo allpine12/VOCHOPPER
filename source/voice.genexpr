@@ -51,6 +51,11 @@ region = 0;
 inc = 0;
 span = 0;
 
+// kill first: a new trigger in the same block wins (choke + retrigger on one voice)
+if (kill != lkill) {
+	lkill = kill;
+	killing = 1;
+}
 if (trig != ltrig) {
 	ltrig = trig;
 	active = 1;
@@ -66,10 +71,6 @@ if (trig != ltrig) {
 	g2s = cs0;
 	g3s = cs0;
 	g4s = cs0;
-}
-if (kill != lkill) {
-	lkill = kill;
-	killing = 1;
 }
 
 // amplitude envelope (attack / release in ms, kill = 5 ms fade)

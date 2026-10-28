@@ -3,7 +3,8 @@
   While the VoChop track is selected, VoChop takes over Push's 8x8 pads (and the
   octave up/down buttons) through the Live API, lights the pads in the chop colours
   and sends presses straight to the engine. Select any other track and the pads
-  go back to Push. The PUSH PADS toggle switches the whole thing off.
+  go back to Push. Push's Session button also gives them back (to launch clips),
+  Note takes them again. The PUSH PADS toggle switches the whole thing off.
 */
 autowatch = 0;
 inlets = 1;
@@ -12,7 +13,7 @@ outlets = 1;
 var surface = null, matrix = null, ctlId = 0, active = 0, wanted = 1, started = 0;
 var octUp = null, octDn = null, octUpId = 0, octDnId = 0;
 var types = [], hues = [], hits = [], sent = [];
-var selApi = null, trackId = 0, selectedId = -1, recOn = 0;
+var selApi = null, trackId = 0, selectedId = -1, sessionMode = 0, modeWatch = [];
 for (var i = 0; i < 64; i++) { types[i] = 0; hues[i] = 0; hits[i] = 0; sent[i] = -1; }
 
 var bootTask = new Task(boot, this);
@@ -46,8 +47,34 @@ function boot() {
         selApi = new LiveAPI(onSelected, "live_set view");
         selApi.property = "selected_track";
     } catch (e) { post("VoChop push: no Live API\n"); }
+    watchModes();
     update();
 }
+
+// Session button -> give the pads back, Note button -> take them again
+function watchModes() {
+    for (var k = 0; k < 8; k++) {
+        try {
+            var api = new LiveAPI(null, "control_surfaces " + k);
+            if (!api || Number(api.id) == 0) continue;
+            var names = String(api.call("get_control_names"));
+            if (names.indexOf("Button_Matrix") < 0) continue;
+            post("VoChop push: surface " + k + " controls: " + names + "\n");
+            var pairs = [["Session_Mode_Button", onSessionBtn], ["Note_Mode_Button", onNoteBtn]];
+            for (var q = 0; q < pairs.length; q++) {
+                if (names.indexOf(pairs[q][0]) < 0) continue;
+                var id = parseId(api.call("get_control", pairs[q][0]));
+                if (!id) continue;
+                var w = new LiveAPI(pairs[q][1], "id " + id);
+                w.property = "value";
+                modeWatch.push(w);
+            }
+            return;
+        } catch (e) { }
+    }
+}
+function onSessionBtn(a) { if (a && a[0] == "value" && Number(a[1]) > 0) { sessionMode = 1; update(); } }
+function onNoteBtn(a) { if (a && a[0] == "value" && Number(a[1]) > 0) { sessionMode = 0; update(); } }
 
 function findTrack() {
     try {
@@ -77,7 +104,7 @@ function onSelected(a) {
 function update() {
     if (!started) return;
     if (selectedId < 0 && selApi) { try { selectedId = parseId(selApi.get("selected_track")); } catch (e) { } }
-    var want = wanted && trackId && selectedId == trackId;
+    var want = wanted && trackId && selectedId == trackId && !sessionMode;
     if (want && !active) grab();
     else if (!want && active) release();
 }

@@ -242,7 +242,7 @@ function rec(v) {
 function undo(v) {
     if (Number(v) === 0) return;
     if (recording) { stopRecording(); return; }
-    if (takeIdx > 0) { loadTake(takeIdx - 1); setStatus("Undo: back to take " + takeIdx + "/" + takes.length); }
+    if (takeIdx > 0) loadTake(takeIdx - 1);
     else setStatus("Nothing to undo");
 }
 

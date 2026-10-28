@@ -49,4 +49,8 @@ assert(kd > 0 && kd / SR * 1000 < 6, "kill ends within ~5 ms, got " + kd / SR * 
 v = voice(); Object.assign(v.Pm, { s0: 100, s1: 200, mode: 0, rev: 1, amp: 1, hold: 1, trig: 1 });
 o = run(v, SR * 0.05, SR);
 assert(o[100][0] < 200 && o[2000][0] < o[100][0], "reverse runs backwards");
+// kill + retrigger in the same block: the new note must sound
+v = voice(); Object.assign(v.Pm, { s0: 0, s1: 1000, mode: 1, amp: 1, hold: 1, trig: 1 }); run(v, 1000, SR);
+v.Pm.kill = 2; v.Pm.trig = 2; o = run(v, SR * 0.05, SR);
+assert(o[o.length - 1][1] > 0.9 && !o.some((x) => x[10] == 1), "retriggered voice keeps sounding");
 console.log("voice sim OK");
