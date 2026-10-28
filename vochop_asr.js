@@ -1,8 +1,9 @@
 /*
   VoChop - AI words (Node for Max, runs inside [node.script])
-  Offline speech recognition with sherpa-onnx (zipformer, English, int8).
+  Offline speech recognition with sherpa-onnx + NVIDIA Parakeet TDT 0.6B v3 (int8):
+  25 European languages incl. Croatian and English, detected automatically.
   Receives 16 kHz audio from vochop.js, returns every word with its onset time.
-  Nothing leaves your computer.
+  The model (~670 MB) is downloaded once on first use. Nothing leaves your computer.
 */
 const path = require("path");
 const fs = require("fs");
@@ -12,10 +13,9 @@ let maxApi;
 try { maxApi = require("max-api"); } catch (e) { maxApi = null; }   // allows testing outside Max
 
 const DIR = __dirname;
-const MODEL_DIR = path.join(DIR, "vochop_asr_model");
-const HF = "https://huggingface.co/csukuangfj/sherpa-onnx-zipformer-small-en-2023-06-26/resolve/main/";
-const FILES = ["encoder-epoch-99-avg-1.int8.onnx", "decoder-epoch-99-avg-1.int8.onnx",
-               "joiner-epoch-99-avg-1.int8.onnx", "tokens.txt"];
+const MODEL_DIR = path.join(DIR, "vochop_asr_model_v3");
+const HF = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/";
+const FILES = ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"];
 
 let recognizer = null;
 let samples = [];
@@ -35,6 +35,13 @@ function download(url, dest, redirects = 0) {
       if (res.statusCode !== 200) { res.resume(); return reject(new Error("HTTP " + res.statusCode)); }
       const tmp = dest + ".part";
       const f = fs.createWriteStream(tmp);
+      const total = Number(res.headers["content-length"]) || 0;
+      let got = 0, lastPct = -1;
+      res.on("data", (c) => {
+        got += c.length;
+        const pct = total ? Math.floor(got / total * 100) : -1;
+        if (total > 5e6 && pct != lastPct && pct % 5 == 0) { lastPct = pct; status("info", "downloading speech model " + pct + "% (one time, ~670 MB)"); }
+      });
       res.pipe(f);
       f.on("finish", () => f.close(() => { fs.renameSync(tmp, dest); resolve(); }));
       f.on("error", reject);
@@ -77,12 +84,13 @@ async function boot() {
           joiner: M + FILES[2],
         },
         tokens: M + FILES[3],
-        numThreads: 2,
+        modelType: "nemo_transducer",
+        numThreads: 4,
         provider: "cpu",
         debug: 0,
       },
     });
-    status("ready", "offline English model loaded");
+    status("ready", "offline multilingual model loaded (hr, en, de, ...)");
   } catch (e) {
     status("error", String(e && e.message ? e.message : e).slice(0, 120));
   }
@@ -99,7 +107,7 @@ function toWords(r, offset) {
     if (isStart) words.push({ w: clean, t: ts, l: ts });
     else { words[words.length - 1].w += clean; words[words.length - 1].l = ts; }
   }
-  return words.filter((w) => w.w.length > 0).map((w) => ({ w: w.w.replace(/[^A-Za-z0-9']/g, "") || w.w, t: w.t, l: w.l }));
+  return words.map((w) => ({ w: w.w.replace(/[^\p{L}\p{N}']/gu, ""), t: w.t, l: w.l })).filter((w) => w.w.length > 0);
 }
 
 function recognize(audio, rate) {

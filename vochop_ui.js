@@ -15,9 +15,9 @@ for (var i = 0; i < 64; i++) pads.push({ t: 0, h: 0, l: "", e: [], hit: 0 });
 var waveData = [], regionData = [], markData = [];
 var statusTxt = "VoChop ready", infoTxt = "";
 var selR = null, playR = null;
-var modeNo = 0, baseNote = 36, recOn = 0, aiState = 0;
+var modeNo = 1, recOn = 0, aiState = 0, selPad = -1;
 var pressed = -1;
-var MODE_NAMES = ["WORDS + PARTS", "SYLLABLES", "WORD LIST", "KEYS"];
+var MODE_NAMES = ["WORDS", "NOTES", "SEQ"];
 
 // ---------------------------------------------------------------- colours
 var BG = [0.075, 0.08, 0.095], PANEL = [0.11, 0.118, 0.137], EMPTY = [0.155, 0.165, 0.19];
@@ -54,7 +54,7 @@ function hit(k, v) {
 function status() { statusTxt = arrayfromargs(arguments).join(" "); mgraphics.redraw(); }
 function info() { infoTxt = arrayfromargs(arguments).join(" "); mgraphics.redraw(); }
 function mode(m) { modeNo = m; mgraphics.redraw(); }
-function base(b) { baseNote = b; mgraphics.redraw(); }
+function selpad(p) { selPad = Number(p); mgraphics.redraw(); }
 function rec(v) { recOn = v; mgraphics.redraw(); }
 function ai(v) { aiState = v; mgraphics.redraw(); }
 function refresh() { mgraphics.redraw(); }
@@ -105,10 +105,16 @@ function padColor(p) {
     var c;
     switch (p.t) {
         case 1: c = hsl(p.h, 0.78, 0.56); break;            // word
-        case 2: c = hsl(p.h, 0.50, 0.31); break;            // part
-        case 3: c = [0.30, 0.32, 0.36]; break;              // key (white)
-        case 4: c = ACCENT; break;                          // key C
-        case 5: c = [0.19, 0.2, 0.235]; break;              // key (black)
+        case 2: c = hsl(p.h, 0.50, 0.31); break;            // rest of the word
+        case 3: c = [0.30, 0.32, 0.36]; break;              // key in scale
+        case 4: c = hsl(p.h, 0.78, 0.56); break;            // root key (colour of the selected word)
+        case 5: c = [0.19, 0.2, 0.235]; break;              // key, nothing selected
+        case 6: c = hsl(p.h, 0.70, 0.50); break;            // step with a note
+        case 7: c = [0.21, 0.22, 0.26]; break;              // empty step
+        case 8: c = [0.11, 0.115, 0.13]; break;             // past the clip end
+        case 9: c = [0.25, 0.5, 0.95]; break;               // option on
+        case 10: c = [0.19, 0.2, 0.235]; break;             // option off
+        case 11: c = [0.35, 0.85, 0.45]; break;             // playhead
         default: c = EMPTY;
     }
     if (p.hit) c = mix(c, [1, 1, 1], 0.62);
@@ -128,7 +134,7 @@ function paint() {
             var pc = padColor(p);
             col(pc);
             mgraphics.rectangle_rounded(x, y, s, s, rr, rr); mgraphics.fill();
-            if ((p.t == 1 || p.t == 2) && p.e.length) {
+            if ((p.t == 1 || p.t == 2) && p.e.length && p.e[0] !== undefined) {
                 var n = p.e.length, bw = (s - 4) / n, maxh = s * (BIG ? 0.38 : 0.5);
                 col(p.t == 1 ? [0, 0, 0] : [1, 1, 1], p.t == 1 ? 0.32 : 0.30);
                 for (var q = 0; q < n; q++) {
@@ -141,19 +147,18 @@ function paint() {
                 if (p.t != 0) {
                     var fs = BIG ? Math.max(9, Math.min(15, cell * 0.2)) : 8;
                     var lab = fit(p.l, fs, s - 6, p.t == 1);
-                    txt(lab, x + 4, y + fs + 3, fs, (p.t == 1 || p.t == 4) ? [0.06, 0.06, 0.08] : TXT, 0.95, p.t == 1);
+                    txt(lab, x + 4, y + fs + 3, fs, (p.t == 1 || p.t == 4 || p.t == 6 || p.t == 11) ? [0.06, 0.06, 0.08] : TXT, 0.95, p.t == 1);
                 }
+            }
+            if (pi == selPad) {
+                col(ACCENT, 1); mgraphics.set_line_width(2);
+                mgraphics.rectangle_rounded(x + 1, y + 1, s - 2, s - 2, rr, rr); mgraphics.stroke();
             }
             if (pi == pressed) {
                 col([1, 1, 1], 0.9); mgraphics.set_line_width(1.5);
                 mgraphics.rectangle_rounded(x + 0.5, y + 0.5, s - 1, s - 1, rr, rr); mgraphics.stroke();
             }
         }
-    }
-    // bottom-left marker = base note
-    if (!BIG) {
-        col(ACCENT, 0.9);
-        mgraphics.rectangle(g.gx + 1, g.gy + g.side - 2, cell - 2, 1.5); mgraphics.fill();
     }
 
     if (BIG) { paintBigText(g); return; }
@@ -221,13 +226,12 @@ function paint() {
         if (rw > 14 && wl) txt(fit(wl, 8.5, rw - 3, true), hx + ra * ww + 2, top + 12, 8.5, hsl(regionData[k + 2], 0.8, 0.72), 1, true);
     }
     // footer
-    txt(fit(infoTxt || "click a pad to play  |  click the waveform to pick a word for KEYS", 9, ww - 70, false), hx, g.wy + g.wh - 6, 9, DIM, 1, false);
-    txt("base " + noteName(baseNote), g.wx + g.ww - 52, g.wy + g.wh - 6, 9, DIM, 1, false);
+    txt(fit(infoTxt || "top rows = words / rest of word  |  click the waveform to pick a word", 9, ww - 8, false), hx, g.wy + g.wh - 6, 9, DIM, 1, false);
 }
 
 function paintBigText(g) {
     txt(fit(statusTxt, 13, g.w - 24, true), 12, 22, 13, recOn ? [1, 0.45, 0.42] : TXT, 1, true);
-    txt(fit(infoTxt || "click pads to play - top row/top pad = whole word, pads below = its parts", 11, g.w - 24, false),
+    txt(fit(infoTxt || "top row = words, row 2 = rest of the word, below = " + (MODE_NAMES[modeNo] || "") , 11, g.w - 24, false),
         12, g.h - 12, 11, DIM, 1, false);
 }
 

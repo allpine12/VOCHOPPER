@@ -4,6 +4,6 @@
   "private": true,
   "description": "Offline speech engine for VoChop AI WORDS (installed automatically by the device)",
   "dependencies": {
-    "sherpa-onnx-node": "1.13.8"
+    "sherpa-onnx-node": "2.0.1"
   }
 }

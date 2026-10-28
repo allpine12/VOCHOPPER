@@ -1,0 +1,188 @@
+// VoChop voice (gen~ codebox). Positions are in ms of the source buffer.
+// The buffer itself is read by play~ objects outside (they handle the ---name);
+// this computes 5 read heads (1 direct + 4 cloud grains) with their gains.
+// Modes: 0 one-shot, 1 loop, 2 cloud (word start, then a granular sustain on the vowel), 3 repeat
+Param trig(0);
+Param kill(0);
+Param s0(0);
+Param s1(0);
+Param cs0(0);
+Param cs1(0);
+Param rate(1);
+Param mode(0);
+Param rev(0);
+Param amp(0);
+Param att(2);
+Param rel(200);
+Param gate(0);
+Param gsz(120);
+Param rlen(100);
+Param fade(4);
+
+History ltrig(0);
+History lkill(0);
+History pos(0);
+History env(0);
+History active(0);
+History killing(0);
+History stage(0);
+History xf(0);
+History g1p(0);
+History g1s(0);
+History g2p(0.25);
+History g2s(0);
+History g3p(0.5);
+History g3s(0);
+History g4p(0.75);
+History g4s(0);
+
+msps = 1000 / samplerate;
+done = 0;
+w0 = 0;
+w1 = 0;
+w2 = 0;
+w3 = 0;
+w4 = 0;
+edge = 0;
+lo = 0;
+hi = 0;
+g = max(20, gsz);
+region = 0;
+inc = 0;
+span = 0;
+
+if (trig != ltrig) {
+	ltrig = trig;
+	active = 1;
+	killing = 0;
+	stage = 0;
+	xf = 0;
+	pos = rev > 0.5 ? s1 : s0;
+	g1p = 0;
+	g2p = 0.25;
+	g3p = 0.5;
+	g4p = 0.75;
+	g1s = cs0;
+	g2s = cs0;
+	g3s = cs0;
+	g4s = cs0;
+}
+if (kill != lkill) {
+	lkill = kill;
+	killing = 1;
+}
+
+// amplitude envelope (attack / release in ms, kill = 5 ms fade)
+tgt = 0;
+if (active > 0.5 && gate > 0.5 && killing < 0.5) {
+	tgt = 1;
+}
+up = msps / max(0.05, att);
+dn = msps / max(0.05, rel);
+if (killing > 0.5) {
+	dn = msps / 5;
+}
+if (env < tgt) {
+	env = min(tgt, env + up);
+} else if (env > tgt) {
+	env = max(tgt, env - dn);
+}
+
+step = rate * msps;
+fd = max(0.5, fade);
+
+if (active > 0.5) {
+	if (mode < 0.5) {
+		// one-shot (forward or reverse)
+		edge = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
+		w0 = max(0, edge);
+		if (rev > 0.5) {
+			pos = pos - step;
+		} else {
+			pos = pos + step;
+		}
+		if (pos > s1 || pos < s0) {
+			active = 0;
+			done = 1;
+		}
+	} else if (mode < 1.5 || mode > 2.5) {
+		// loop the slice, or repeat its first rlen ms
+		lo = s0;
+		hi = s1;
+		if (mode > 2.5) {
+			hi = min(s1, s0 + max(5, rlen));
+		}
+		edge = min(1, min((pos - lo) / fd, (hi - pos) / fd));
+		w0 = max(0, edge);
+		if (rev > 0.5) {
+			pos = pos - step;
+			if (pos < lo) {
+				pos = hi - (lo - pos);
+			}
+		} else {
+			pos = pos + step;
+			if (pos > hi) {
+				pos = lo + (pos - hi);
+			}
+		}
+	} else {
+		// cloud: play the word from its start, then cross into grains on the vowel
+		edge = min(1, min((pos - s0) / fd, (s1 - pos) / fd));
+		w0 = max(0, edge) * (1 - xf);
+		if (pos < s1) {
+			pos = pos + step;
+		}
+		if (stage < 0.5 && pos >= cs1 - 40 * rate) {
+			stage = 1;
+		}
+		if (stage > 0.5) {
+			xf = min(1, xf + msps / 60);
+			region = max(0, cs1 - cs0);
+			g = min(max(20, gsz), max(20, region / max(0.25, rate)));
+			inc = msps / g;
+			span = max(0, region - g * rate);
+			g1p = g1p + inc;
+			if (g1p >= 1) {
+				g1p = g1p - 1;
+				g1s = cs0 + (noise() * 0.5 + 0.5) * span;
+			}
+			g2p = g2p + inc;
+			if (g2p >= 1) {
+				g2p = g2p - 1;
+				g2s = cs0 + (noise() * 0.5 + 0.5) * span;
+			}
+			g3p = g3p + inc;
+			if (g3p >= 1) {
+				g3p = g3p - 1;
+				g3s = cs0 + (noise() * 0.5 + 0.5) * span;
+			}
+			g4p = g4p + inc;
+			if (g4p >= 1) {
+				g4p = g4p - 1;
+				g4s = cs0 + (noise() * 0.5 + 0.5) * span;
+			}
+			// Hann windows at 4x overlap sum to 2
+			w1 = (0.5 - 0.5 * cos(6.283185307 * g1p)) * 0.5 * xf;
+			w2 = (0.5 - 0.5 * cos(6.283185307 * g2p)) * 0.5 * xf;
+			w3 = (0.5 - 0.5 * cos(6.283185307 * g3p)) * 0.5 * xf;
+			w4 = (0.5 - 0.5 * cos(6.283185307 * g4p)) * 0.5 * xf;
+		}
+	}
+	if (tgt < 0.5 && env <= 0) {
+		active = 0;
+		done = 1;
+	}
+}
+
+ga = env * amp;
+out1 = pos;
+out2 = w0 * ga;
+out3 = g1s + g1p * g * rate;
+out4 = w1 * ga;
+out5 = g2s + g2p * g * rate;
+out6 = w2 * ga;
+out7 = g3s + g3p * g * rate;
+out8 = w3 * ga;
+out9 = g4s + g4p * g * rate;
+out10 = w4 * ga;
+out11 = done;

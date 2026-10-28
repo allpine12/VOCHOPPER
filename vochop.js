@@ -1,12 +1,19 @@
 /*
   VoChop - main engine  (Max for Live [js], ES5)
   ------------------------------------------------
-  - reads the recorded phrase from buffer~
-  - chops it into WORDS (pauses + deep energy valleys) and
-    PARTS / syllables (Mermelstein-style loudness-hull valleys)
-  - detects the pitch of every slice (YIN) for Keys/Tune/Snap
-  - maps slices onto an 8x8 pad grid (Push 3 / any MIDI keyboard / mouse)
-  - 8-voice polyphonic playback, effects control, takes, MIDI clip export
+  - records a phrase (own audio input, or the "VoChop Input" helper device)
+  - chops it into WORDS (pauses + energy valleys, or AI speech recognition)
+    and splits every word into 1-3 PARTS; the "rest" slice = word minus its first part
+  - pad surface (Push 3 / on-screen grid), top two rows always = words / rests:
+      Words layout : 4 row-pairs = 32 words
+      Notes layout : rows 3-8 = in-key keyboard, plays the selected word tuned
+                     (retune~) to the note, with Cloud / Loop / Repeat sustain
+      Seq layout   : rows 3-6 = 32 steps, row 7 = pages, row 8 = step / clip length
+  - MIDI note map (what gets recorded into clips):
+      0-31  = words 1-32        32-63 = rests of words 1-32
+      64-127 = keys: the selected word tuned; C5-B5 (84-95) = nearest pitch,
+               every octave up/down from there = +/-12
+  - 8-voice polyphony (gen~ voices), effects, takes, clip recording / step sequencer
 */
 
 autowatch = 0;
@@ -15,55 +22,69 @@ outlets = 3;
 setinletassist(0, "messages");
 setoutletassist(0, "to voices");
 setoutletassist(1, "to UI (grid / big view / push)");
-setoutletassist(2, "to patch (buffer, bus, fx, params, state)");
+setoutletassist(2, "to patch (buffer, bus, fx, input, banks, state)");
 
 var me = this;
 var BUF = (jsarguments.length > 1) ? String(jsarguments[1]) : "vochop_buf";
 var NV = 8;
 var MAXREC_MS = 60000;
 var NBINS = 420;
+var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84;
 
 // ---------------------------------------------------------------- params
 var P = {
-    mode: 0,      // 0 Words+Parts, 1 Syllables, 2 Word list, 3 Keys
-    trig: 0,      // 0 One-shot, 1 Gate, 2 Loop
-    pitch: 0, attack: 2, release: 120, spread: 30, poly: 8, vel: 70,
-    stutter: 0, reverse: 0, snap: 0, tune: 1, choke: 0,
-    wsens: 50, ssens: 50, base: 36, link: 1,
+    layout: 1,    // 0 Words, 1 Notes, 2 Seq
+    keys: 0,      // hold mode for key notes: 0 Cloud, 1 Loop, 2 Repeat, 3 One-Shot
+    pads: 0,      // word/rest pads: 0 One-Shot, 1 Gate, 2 Loop, 3 Repeat
+    atune: 0, key: 0,
+    pitch: 0, attack: 2, release: 250, grain: 120, rate: 2,
+    spread: 30, poly: 8, vel: 70, reverse: 0, choke: 1,
+    wsens: 50, ssens: 50, link: 1, ai: 0,
+    page: 0, octave: 0,
     ftype: 0, cutoff: 20000, reso: 10, crush: 0, drive: 0,
     delay: 0, dtime: 2, fdbk: 40, reverb: 0, size: 60,
-    ai: 0         // AI WORDS: speech recognition decides word boundaries
+    thresh: -40, autorec: 0
 };
 // chopping constants (tuned on test phrases; sensitivity knobs move around these)
-var T = { gapHi: 260, gapLo: 40, wThrHi: 24, wThrLo: 7, minWHi: 150, minWLo: 70, sThrHi: 9, sThrLo: 1.5,
-          minSHi: 120, minSLo: 45, vowelDb: 18, minWordMs: 90 };
-var MODE_NAMES = ["Words + Parts", "Syllables", "Word List", "Keys"];
-var STUTTER_BEATS = [0, 1, 0.5, 0.25, 0.125, 1 / 3, 1 / 6];
+var T = { gapHi: 160, gapLo: 25, wThrHi: 20, wThrLo: 6, minWHi: 150, minWLo: 70,
+          maxSylHi: 4, maxSylLo: 2, sylThr: 3, minSyl: 16,
+          sThrHi: 9, sThrLo: 1.5, minSHi: 120, minSLo: 45, vowelDb: 18, minWordMs: 90,
+          onsetDb: 40, restMinMs: 150, dropGapMs: 20, ceilLo: 8, ceilHi: 18, maxMsHi: 1300, maxMsLo: 600 };
+var LAYOUT_NAMES = ["WORDS", "NOTES", "SEQ"];
+var KEYS_NAMES = ["Cloud", "Loop", "Repeat", "One-Shot"];
+var RATE_BEATS = [1, 0.5, 0.25, 0.125, 1 / 3, 1 / 6];
 var DTIME_BEATS = [0.25, 1 / 3, 0.5, 0.75, 1, 1.5, 2];
+var SEQ_RES = [0.125, 0.25, 0.5, 1];
+var SEQ_LEN = [1, 2, 4, 8];
 var NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 // ---------------------------------------------------------------- state
 var ready = 0, bootT = 0;
 var sr = 44100, nFrames = 0, recLen = 0, normGain = 1;
 var feat = null, waveBins = [];
-var words = [], phrase = null;
-var pads = [], keySlice = null;
+var words = [], sel = null;
+var surf = [], padNote = [];
 var voices = [];
-var recording = 0, waitingDone = 0, recStartT = 0, recStopT = 0;
-var pendingLoad = 0, inputSeen = 0, learning = 0;
+var recording = 0, waitingDone = 0, recStartT = 0, recStopT = 0, recLocal = 0, autoRec = 0, lastLoud = 0;
+var pendingLoad = 0, inputSeen = 0;
 var takes = [], takeIdx = -1, lastState = "";
 var tempo = 120, scaleRoot = 0, scaleInts = [0, 2, 4, 5, 7, 9, 11];
-var bendSemis = 0, tempoApi = null;
+var bendSemis = 0, tempoApi = null, scaleApi = null;
 var asrList = null, asrId = 0, asrState = "off", asr16 = [];   // AI words
+var seq = { res: 1, page: 0, steps: [], len: 8, pos: -1 };
+var recNotes = {}, recPending = [];
+var inIO = null, inTypes = [], inChans = [];
+var trackPath = "";
 
 var i;
-for (i = 0; i < 64; i++) pads[i] = null;
-for (i = 0; i < NV; i++) voices[i] = { busy: 0, note: -1, held: 0, t: 0, relT: 0, loop: 0, dur: 0, pad: -1, args: null };
+for (i = 0; i < 64; i++) { surf[i] = null; padNote[i] = -1; }
+for (i = 0; i < NV; i++) voices[i] = { busy: 0, note: -1, held: 0, t: 0, relT: 0, keep: 0, pad: -1, chop: 0, trig: 0, kill: 0 };
 
 var recTask = new Task(function () { stopRecording(); }, this);
 var doneTask = new Task(function () { if (waitingDone) recdone(-1); }, this);
-var rechopTask = new Task(function () { if (feat) { segment(); buildPads(); sendUI(); summary(); } }, this);
-var hitTasks = {};
+var rechopTask = new Task(function () { if (feat) { segment(); refreshAll(); summary(); } }, this);
+var seqTask = new Task(seqTick, this);
+var recTaskCheck = new Task(recCheck, this);
 
 // ---------------------------------------------------------------- utils
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
@@ -73,6 +94,14 @@ function setStatus(s) { outlet(1, "status", String(s)); }
 function setInfo(s) { outlet(1, "info", String(s)); }
 function noteName(n) { n = Math.round(n); return NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 2); }
 function fmtSec(samps) { return (samps / sr).toFixed(2) + "s"; }
+function ms(samps) { return samps / sr * 1000; }
+function mtof(m) { return 440 * Math.pow(2, (m - 69) / 12); }
+function parseJson(raw) {
+    var s = (raw instanceof Array) ? raw.join(" ") : String(raw);
+    var k = s.indexOf("{");
+    if (k < 0) return null;
+    try { return JSON.parse(s.substring(k)); } catch (e) { return null; }
+}
 
 // ---------------------------------------------------------------- boot
 function init() {
@@ -89,13 +118,19 @@ function start() {
         var t = tempoApi.get("tempo");
         if (t && t.length && t[0] > 0) tempo = Number(t[0]);
     } catch (e) { post("VoChop: tempo api failed\n"); }
+    try {
+        scaleApi = new LiveAPI(onScale, "live_set");
+        scaleApi.property = "scale_intervals";
+    } catch (e2) { }
     refreshScale();
+    findTrack();
     announce();
     updateFx();
-    outlet(1, "mode", P.mode);
-    outlet(1, "base", P.base);
-    if (!words.length && !pendingLoad) setStatus("Press REC (VoChop Input on mic track) or drop audio");
-    sendUI();
+    outlet(2, "banks", "getcount");
+    inputsRefresh();
+    if (!words.length && !pendingLoad) setStatus("Press REC and speak (pick AUDIO FROM first) - or drop audio");
+    refreshAll();
+    if (P.layout == 2) seqEnter();
 }
 
 function onTempo(a) {
@@ -103,6 +138,12 @@ function onTempo(a) {
         tempo = Number(a[1]);
         updateFx();
     }
+}
+
+function onScale(a) {
+    if (!ready) return;
+    refreshScale();
+    buildSurface(); sendUI();
 }
 
 function refreshScale() {
@@ -116,7 +157,19 @@ function refreshScale() {
             for (var k = 0; k < iv.length; k++) { var v = Number(iv[k]); if (!isNaN(v)) out.push(v); }
             if (out.length) scaleInts = out;
         }
-    } catch (e) { /* Live < 12: keep major scale */ }
+    } catch (e) { /* keep major scale */ }
+}
+
+function findTrack() {
+    try {
+        var tr = new LiveAPI(null, "this_device canonical_parent"), guard = 0;
+        while (tr && String(tr.type) != "Track" && guard < 8) {
+            tr = new LiveAPI(null, tr.unquotedpath + " canonical_parent");
+            guard++;
+        }
+        if (tr && String(tr.type) == "Track") trackPath = tr.unquotedpath;
+    } catch (e) { trackPath = ""; }
+    return trackPath;
 }
 
 function announce() {
@@ -127,25 +180,27 @@ function announce() {
 function p(name, v) {
     P[name] = Number(v);
     switch (name) {
-        case "mode":
-            buildPads(); sendUI(); outlet(1, "mode", P.mode);
-            setInfo(MODE_NAMES[P.mode] || "");
+        case "layout":
+            buildSurface(); sendUI();
+            setInfo(LAYOUT_NAMES[P.layout] + " layout");
+            if (P.layout == 2 && ready) seqEnter(); else seqTask.cancel();
+            break;
+        case "page": case "octave":
+            buildSurface(); sendUI();
+            if (P.layout == 2 && ready) seqRefresh();
             break;
         case "wsens": case "ssens":
             rechopTask.cancel(); rechopTask.schedule(120);
             break;
-        case "snap":
-            refreshScale(); computeTunes();
-            break;
-        case "base":
-            outlet(1, "base", P.base); sendUI();
+        case "key": case "atune":
+            refreshScale();
             break;
         case "ai":
             if (P.ai) {
                 if (asrState == "ready") { if (feat) sendAsr(); else setStatus("AI words on - record a phrase"); }
                 else if (asrState == "missing" || asrState == "error") installAsr();
                 else { setStatus("AI words: starting speech engine..."); aistart(); }
-            } else if (feat) { asrList = null; segment(); buildPads(); sendUI(); summary(); }
+            } else if (feat) { asrList = null; segment(); refreshAll(); summary(); }
             break;
         case "link":
             inputSeen = 0; announce();
@@ -177,26 +232,45 @@ function updateFx() {
 }
 
 // ---------------------------------------------------------------- buttons
-function learn(v) {
-    if (v === 0) return;
-    learning = 1;
-    setStatus("LEARN: press the bottom-left pad on Push");
-}
-
 function rec(v) {
     v = Number(v);
     if (!ready || now() - bootT < 1500) { outlet(2, "setrec", recording); return; }
+    autoRec = 0;
     if (v > 0) startRecording(); else stopRecording();
 }
 
-function takeprev(v) { if (v === 0) return; if (takeIdx > 0) loadTake(takeIdx - 1); else setStatus("No earlier take"); }
-function takenext(v) { if (v === 0) return; if (takeIdx < takes.length - 1) loadTake(takeIdx + 1); else setStatus("No later take"); }
+function undo(v) {
+    if (Number(v) === 0) return;
+    if (recording) { stopRecording(); return; }
+    if (takeIdx > 0) { loadTake(takeIdx - 1); setStatus("Undo: back to take " + takeIdx + "/" + takes.length); }
+    else setStatus("Nothing to undo");
+}
+
+function takeprev(v) { if (Number(v) === 0) return; if (takeIdx > 0) loadTake(takeIdx - 1); else setStatus("No earlier take"); }
+function takenext(v) { if (Number(v) === 0) return; if (takeIdx < takes.length - 1) loadTake(takeIdx + 1); else setStatus("No later take"); }
+
+// Push octave buttons / OCT-/OCT+ parameters: octave in Notes, word page elsewhere
+function octup(v) { if (Number(v) === 0) return; shiftOct(1); }
+function octdown(v) { if (Number(v) === 0) return; shiftOct(-1); }
+function shiftOct(d) {
+    if (P.layout == 1) {
+        P.octave = clamp(P.octave + d, -3, 3);
+        outlet(2, "setparam", "octave", P.octave);
+        setInfo("Octave " + (P.octave > 0 ? "+" : "") + P.octave);
+    } else {
+        P.page = clamp(P.page + d, 0, 3);
+        outlet(2, "setparam", "page", P.page);
+        setInfo("Words " + (P.page * 8 + 1) + "-" + (P.page * 8 + 8));
+        if (P.layout == 2) seqRefresh();
+    }
+    buildSurface(); sendUI();
+}
 
 function bend(v) {
     bendSemis = ((Number(v) - 64) / 64) * 2;
 }
 
-// ---------------------------------------------------------------- inter-device bus
+// ---------------------------------------------------------------- inter-device bus (VoChop Input helper)
 function busin() {
     var a = arrayfromargs(arguments);
     if (a.length < 2 || Number(a[0]) != P.link) return;
@@ -217,13 +291,14 @@ function startRecording() {
     if (waitingDone) return;
     allNotesOff();
     recording = 1;
-    recStartT = now();
+    recStartT = now(); lastLoud = now();
+    recLocal = inputSeen ? 0 : 1;
     outlet(2, "buf", "size", MAXREC_MS);
-    outlet(2, "bus", P.link, "rec", 1, BUF);
+    if (recLocal) outlet(2, "lrec", 1);
+    else outlet(2, "bus", P.link, "rec", 1, BUF);
     outlet(2, "setrec", 1);
     outlet(1, "rec", 1);
-    if (inputSeen) setStatus("REC... speak now - press REC again to chop");
-    else setStatus("REC... (no 'VoChop Input' heard on Link " + P.link + " yet - put it on your mic track)");
+    setStatus(autoRec ? "AUTO REC... stops after 1.5 s of silence" : "REC... speak now - press REC again to chop");
     recTask.cancel();
     recTask.schedule(MAXREC_MS - 200);
 }
@@ -239,7 +314,25 @@ function stopRecording() {
     doneTask.schedule(700);
     outlet(2, "setrec", 0);
     outlet(1, "rec", 0);
-    outlet(2, "bus", P.link, "rec", 0);
+    if (recLocal) outlet(2, "lrec", 0);
+    else outlet(2, "bus", P.link, "rec", 0);
+    if (autoRec) { autoRec = 0; }
+}
+
+// snapshot of the local record~ position when recording stopped (0..1)
+function lfrac(v) { recdone(Number(v)); }
+
+// input level (local input, every 30 ms): AUTO record
+function lvl(v) {
+    v = Number(v);
+    var db = v > 0.000001 ? 20 * Math.log(v) / Math.LN10 : -120, t = now();
+    if (db > P.thresh) lastLoud = t;
+    if (P.autorec && !recording && !waitingDone && db > P.thresh && ready && t - bootT > 1500 && !inputSeen) {
+        autoRec = 1;
+        startRecording();
+    } else if (recording && autoRec && t - lastLoud > 1500 && t - recStartT > 400) {
+        stopRecording();
+    }
 }
 
 function recdone(frac) {
@@ -255,7 +348,7 @@ function recdone(frac) {
     var n = (frac > 0 && frac <= 1) ? Math.round(frac * total) : est;
     if (n > total) n = total;
     if (n < bsr * 0.08) {
-        if (!inputSeen && frac < 0) setStatus("Nothing recorded: add 'VoChop Input' to your mic track (Link " + P.link + ")");
+        if (recLocal) setStatus("Nothing recorded: pick your mic in AUDIO FROM (or use the VoChop Input device)");
         else setStatus("Recording too short - try again");
         return;
     }
@@ -340,20 +433,25 @@ function analyzeAll() {
     var t0 = now();
     if (!readFeatures()) { setStatus("Could not read audio"); return; }
     segment();
-    buildPads();
+    sel = words.length ? words[0] : null;
     sendWave();
-    sendUI();
+    refreshAll();
     summary(now() - t0);
     if (P.ai) { if (asrState == "ready") sendAsr(); else if (asrState == "missing") installAsr(); }
 }
 
-function summary(ms) {
+function refreshAll() {
+    buildSurface();
+    sendUI();
+}
+
+function summary(msv) {
     var parts = 0;
-    for (var k = 0; k < words.length; k++) parts += Math.max(1, words[k].subs.length);
+    for (var k = 0; k < words.length; k++) parts += words[k].np;
     var s = words.length + " words / " + parts + " parts  (" + fmtSec(nFrames) + ")";
     if (takes.length) s += "   take " + (takeIdx + 1) + "/" + takes.length;
-    if (ms !== undefined) s += "   " + ms + " ms";
-    if (!words.length) s = "No speech found - try lowering the input threshold or speak louder";
+    if (msv !== undefined) s += "   " + msv + " ms";
+    if (!words.length) s = "No speech found - speak louder or closer to the mic";
     setStatus(s);
 }
 
@@ -365,7 +463,6 @@ function readFeatures() {
     sr = total / (lms / 1000);
     var n = (recLen > 0) ? Math.min(recLen, total) : total;
     nFrames = n;
-    var normGuess = 1;
     var hop = Math.max(16, Math.round(sr * 0.005));
     var nf = Math.floor(n / hop);
     if (nf < 8) return false;
@@ -396,7 +493,7 @@ function readFeatures() {
             if (pos + j >= nextBin) { if (bi < NBINS) bins[bi] = binMax; bi++; binMax = 0; nextBin = (bi + 1) * n / NBINS; }
             lpA += bA * (yd - lpA); lpB += bA * (lpA - lpB);
             rph += rs;
-            if (rph >= 1) { rph -= 1; asr16.push(Math.round(lpB * normGuess * 32767) / 32767); }
+            if (rph >= 1) { rph -= 1; asr16.push(lpB); }
             hpY = aHP * (hpY + yd - hpX); hpX = yd;
             lp += bLP * (hpY - lp);
             acc += yd * yd; accB += lp * lp;
@@ -437,23 +534,46 @@ function smoothDb(a, rad) {
 
 // Split [a,b) at the deepest valley below the "hull" min(maxLeft,maxRight);
 // recursive.  Pushes split frame indices into out.
-function hullSplit(cv, a, b, thr, minLen, out, depth) {
+function hullSplit(cv, a, b, thr, minLen, out, depth, ceil) {
     if (depth > 40 || b - a < 2 * minLen) return;
+    var best = valley(cv, a, b, minLen, ceil);
+    if (best.k >= 0 && best.d >= thr) {
+        out.push(best.k);
+        hullSplit(cv, a, best.k, thr, minLen, out, depth + 1, ceil);
+        hullSplit(cv, best.k, b, thr, minLen, out, depth + 1, ceil);
+    }
+}
+
+// deepest valley (below the hull) in [a,b) at least minLen from both ends (and below ceil, if given)
+function valley(cv, a, b, minLen, ceil) {
+    if (ceil === undefined) ceil = 1e9;
     var lm = new Array(b - a), m = -1e9, k, best = -1, bestD = 0, h, d;
     for (k = a; k < b; k++) { if (cv[k] > m) m = cv[k]; lm[k - a] = m; }
     m = -1e9;
     for (k = b - 1; k >= a; k--) {
         if (cv[k] > m) m = cv[k];
-        if (k - a < minLen || b - k < minLen) continue;
+        if (k - a < minLen || b - k < minLen || cv[k] > ceil) continue;
         h = Math.min(lm[k - a], m);
         d = h - cv[k];
         if (d > bestD) { bestD = d; best = k; }
     }
-    if (best >= 0 && bestD >= thr) {
-        out.push(best);
-        hullSplit(cv, a, best, thr, minLen, out, depth + 1);
-        hullSplit(cv, best, b, thr, minLen, out, depth + 1);
+    return { k: best, d: bestD };
+}
+
+// syllable nuclei = peaks of the vowel-band energy with enough prominence
+function sylCount(bDb, a, b) {
+    var n = 0, last = -1e9, k, j, floorV = feat.btop - 30;
+    for (k = a + 1; k < b - 1; k++) {
+        if (!(bDb[k] >= bDb[k - 1] && bDb[k] > bDb[k + 1]) || bDb[k] < floorV) continue;
+        var pk = bDb[k], lmin = pk, rmin = pk;
+        for (j = k - 1; j >= a && bDb[j] <= pk; j--) if (bDb[j] < lmin) lmin = bDb[j];
+        if (j < a) lmin = Math.min(lmin, bDb[a]);
+        for (j = k + 1; j < b && bDb[j] <= pk; j++) if (bDb[j] < rmin) rmin = bDb[j];
+        if (pk - Math.max(lmin, rmin) < T.sylThr && !(j >= b && j - k > 1 && pk - lmin >= T.sylThr)) continue;
+        if (k - last < T.minSyl) continue;
+        n++; last = k;
     }
+    return Math.max(1, n);
 }
 
 function segment() {
@@ -475,7 +595,7 @@ function segment() {
     }
     if (on) runs.push([st, nf]);
 
-    // 2) bridge short gaps (shorter gap = more words at high sensitivity)
+    // 2) bridge very short gaps (stop closures inside a word)
     var gapF = Math.round(lerp(T.gapHi, T.gapLo, ws) / 5);
     var merged = [];
     for (r = 0; r < runs.length; r++) {
@@ -492,26 +612,30 @@ function segment() {
     }
 
     var wThr = lerp(T.wThrHi, T.wThrLo, ws), minW = Math.round(lerp(T.minWHi, T.minWLo, ws) / 5);
-    var sThr = lerp(T.sThrHi, T.sThrLo, ss), minS = Math.round(lerp(T.minSHi, T.minSLo, ss) / 5);
+    var maxSyl = Math.round(lerp(T.maxSylHi, T.maxSylLo, ws));
     var pre = 9, post = 18; // edge extension limits in frames (45 / 90 ms)
     var lvl = F.floor + Math.min(6, range * 0.12);
     var list = [];
-    if (P.ai && asrList && asrList.length) {
+    var useAi = P.ai && asrList && asrList.length;
+    if (useAi) {
         list = asrPieces(eDb, thr, lvl, hop);
-    } else
-    for (r = 0; r < keep.length; r++) {
-        var a = keep[r][0], b = keep[r][1];
-        var cuts = [];
-        hullSplit(eDb, a, b, wThr, minW, cuts, 0);
-        cuts.sort(function (x, y) { return x - y; });
-        var edges = [a].concat(cuts).concat([b]);
-        for (k = 0; k < edges.length - 1; k++) {
-            list.push({ a: edges[k], b: edges[k + 1], gapL: k == 0, gapR: k == edges.length - 2 });
+    } else {
+        for (r = 0; r < keep.length; r++) {
+            var a = keep[r][0], b = keep[r][1];
+            var cuts = [];
+            // a word gap has to dip close to the noise floor (a fricative or a stop inside a word doesn't)
+            hullSplit(eDb, a, b, wThr, minW, cuts, 0, F.floor + lerp(T.ceilLo, T.ceilHi, ws) * Math.max(0.5, range / 50));
+            cuts.sort(function (x, y) { return x - y; });
+            var edges = [a].concat(cuts).concat([b]);
+            for (k = 0; k < edges.length - 1; k++) {
+                list.push({ a: edges[k], b: edges[k + 1], gapL: k == 0, gapR: k == edges.length - 2 });
+            }
         }
+        // a word needs a vowel: merge pieces without a strong 300-3500 Hz nucleus
+        list = mergeWeak(list, bDb, F.btop, eDb);
+        // connected speech: pieces with too many syllables are several words glued together
+        list = splitLong(list, eDb, bDb, maxSyl);
     }
-    // a word needs a vowel: merge pieces without a strong 300-3500 Hz nucleus
-    // (stray "s", "t", breaths) or that are very short into a neighbour
-    if (!(P.ai && asrList && asrList.length)) list = mergeWeak(list, bDb, F.btop, eDb);
 
     // extend gap-side edges to catch consonant onsets and tails
     for (k = 0; k < list.length; k++) {
@@ -529,29 +653,126 @@ function segment() {
         }
     }
 
+    var sThr = lerp(T.sThrHi, T.sThrLo, ss), minS = Math.round(lerp(T.minSHi, T.minSLo, ss) / 5);
+    var noiseAmp = Math.sqrt(Math.pow(10, F.floor / 10));
     words = [];
     for (k = 0; k < list.length && k < 64; k++) {
         var L = list[k];
         var hue = (0.56 + k * 0.618034) % 1;
-        var word = mkSlice(L.ea * hop, Math.min(nFrames, L.eb * hop), "word", k, 0, 1, hue);
+        var s0 = L.ea * hop, s1 = Math.min(nFrames, L.eb * hop);
+        // sample-accurate trim of silence before the first sound / after the tail
+        if (L.gapL) s0 = refineOnset(s0, s1, noiseAmp);
+        if (L.gapR) s1 = refineTail(s0, s1, noiseAmp);
+        var word = mkSlice(s0, s1, "word", k, hue);
         word.text = L.text || "";
-        var sc = [];
-        hullSplit(bDb, L.a, L.b, sThr, minS, sc, 0);
-        sc.sort(function (x, y) { return x - y; });
-        var se = [word.s];
-        for (var q = 0; q < sc.length; q++) se.push(sc[q] * hop + Math.floor(hop / 2));
-        se.push(word.e);
-        word.cuts = se;
-        word.subs = partsFromCuts(word, se);
+        splitWord(word, L, bDb, sThr, minS, hop);
         words.push(word);
     }
-    phrase = nFrames > 0 ? mkSlice(0, nFrames, "phrase", -1, 0, 1, 0.08) : null;
-    if (keySlice && keySlice.kind != "phrase") keySlice = null;
-    if (P.snap) computeTunes();
+    if (sel && words.indexOf(sel) < 0) sel = words.length ? words[0] : null;
+    if (!sel && words.length) sel = words[0];
+}
+
+// pieces with more syllables than maxSyl get split at their deepest energy valley
+function splitLong(list, eDb, bDb, maxSyl) {
+    var maxMs = lerp(T.maxMsHi, T.maxMsLo, clamp(P.wsens / 100, 0, 1));
+    var out = [], stack = list.slice(0).reverse(), guard = 0;
+    while (stack.length && guard++ < 500) {
+        var L = stack.pop();
+        var n = sylCount(bDb, L.a, L.b);
+        if ((n <= maxSyl && (L.b - L.a) * 5 <= maxMs) || L.b - L.a < 2 * T.minSyl) { out.push(L); continue; }
+        var v = valley(eDb, L.a, L.b, T.minSyl);
+        if (v.k < 0) { out.push(L); continue; }
+        // prefer the syllable valley nearest the middle when energy dips are equally shallow
+        stack.push({ a: v.k, b: L.b, gapL: false, gapR: L.gapR });
+        stack.push({ a: L.a, b: v.k, gapL: L.gapL, gapR: false });
+    }
+    return out;
+}
+
+// first real sound in the slice: 1 ms windows, -onsetDb below the local peak (or above noise)
+function refineOnset(s, e, noiseAmp) {
+    var span = Math.min(e - s, Math.round(sr * 0.3));
+    var win = Math.max(8, Math.round(sr * 0.001));
+    if (span < win * 6) return s;
+    var arr = new Buffer(BUF).peek(1, s, span);
+    if (!arr || typeof arr == "number") return s;
+    var nw = Math.floor(span / win), rms = [], mx = 0, q, j, acc, mean;
+    for (q = 0; q < nw; q++) {
+        acc = 0; mean = 0;
+        for (j = 0; j < win; j++) mean += arr[q * win + j];
+        mean /= win;
+        for (j = 0; j < win; j++) { var v = arr[q * win + j] - mean; acc += v * v; }
+        rms[q] = Math.sqrt(acc / win);
+        if (rms[q] > mx) mx = rms[q];
+    }
+    if (mx <= 0) return s;
+    var th = Math.max(mx * Math.pow(10, -T.onsetDb / 20), noiseAmp * normGainGuess() * 2.5);
+    for (q = 0; q < nw; q++) if (rms[q] > th) break;
+    if (q >= nw) return s;
+    return s + Math.max(0, q - 8) * win;
+}
+
+function refineTail(s, e, noiseAmp) {
+    var span = Math.min(e - s, Math.round(sr * 0.3));
+    var win = Math.max(8, Math.round(sr * 0.002));
+    if (span < win * 6) return e;
+    var st = e - span;
+    var arr = new Buffer(BUF).peek(1, st, span);
+    if (!arr || typeof arr == "number") return e;
+    var nw = Math.floor(span / win), rms = [], mx = 0, q, j, acc;
+    for (q = 0; q < nw; q++) {
+        acc = 0;
+        for (j = 0; j < win; j++) { var v = arr[q * win + j]; acc += v * v; }
+        rms[q] = Math.sqrt(acc / win);
+        if (rms[q] > mx) mx = rms[q];
+    }
+    if (mx <= 0) return e;
+    var th = Math.max(mx * Math.pow(10, -40 / 20), noiseAmp * normGainGuess() * 1.5);
+    for (q = nw - 1; q >= 0; q--) if (rms[q] > th) break;
+    if (q < 0) return e;
+    return Math.min(e, st + (q + 1) * win + Math.round(sr * 0.015));
+}
+
+// features are computed before normalize: the buffer may already be normalized when peeked
+function normGainGuess() { return 1; }
+
+// parts (1-3) by syllable valleys; the rest slice starts at the cut nearest the middle
+function splitWord(word, L, bDb, sThr, minS, hop) {
+    var sc = [];
+    hullSplit(bDb, L.a, L.b, sThr, minS, sc, 0);
+    sc.sort(function (x, y) { return x - y; });
+    var cuts = [];
+    for (var q = 0; q < sc.length; q++) {
+        var c = sc[q] * hop + Math.floor(hop / 2);
+        if (c > word.s + sr * 0.04 && c < word.e - sr * 0.04) cuts.push(c);
+    }
+    var len = word.e - word.s, mid = word.s + len / 2;
+    if (!cuts.length && ms(len) >= T.restMinMs) {
+        // no syllable valley: deepest dip in the middle 30-70 %, else the middle itself
+        var fa = Math.floor((word.s + len * 0.3) / hop), fb = Math.floor((word.s + len * 0.7) / hop), best = -1, bv = 1e9;
+        for (var f = fa; f < fb && f < bDb.length; f++) if (bDb[f] < bv) { bv = bDb[f]; best = f; }
+        cuts.push(best >= 0 ? best * hop + Math.floor(hop / 2) : Math.round(mid));
+    }
+    // at most 3 parts: keep the 2 cuts closest to even thirds
+    while (cuts.length > 2) {
+        var bi = 0, bl = 1e20, se = [word.s].concat(cuts).concat([word.e]);
+        for (var k = 1; k < se.length - 1; k++) { var l = se[k + 1] - se[k - 1]; if (l < bl) { bl = l; bi = k - 1; } }
+        cuts.splice(bi, 1);
+    }
+    word.cuts = cuts;
+    word.np = cuts.length + 1;
+    word.rest = null;
+    if (cuts.length) {
+        var rc = cuts[0], bd = 1e20;
+        for (var j = 0; j < cuts.length; j++) if (Math.abs(cuts[j] - mid) < bd) { bd = Math.abs(cuts[j] - mid); rc = cuts[j]; }
+        var r = mkSlice(rc, word.e, "rest", word.wi, word.hue);
+        r.frac = (rc - word.s) / len;
+        word.rest = r;
+    }
 }
 
 // ---------------------------------------------------------------- AI words
-// Speech recognition gives word onsets (+-60 ms); each boundary is then
+// Speech recognition gives word onsets (+-80 ms); each boundary is then
 // snapped to the deepest nearby energy valley and silent edges are trimmed.
 function asrPieces(eDb, thr, lvl, hop) {
     var nf = eDb.length, fps = sr / hop, W = asrList, out = [], k, q;
@@ -573,7 +794,7 @@ function asrPieces(eDb, thr, lvl, hop) {
         cuts.push(Math.max(best, (cuts.length ? cuts[cuts.length - 1] : 0) + 2));
     }
     // phrase onset / end from the acoustic activity
-    var a0 = Math.max(0, starts[0] - 50), first = starts[0];
+    var first = starts[0];
     for (q = Math.max(0, starts[0] - 50); q < Math.min(nf, starts[0] + 30); q++) if (eDb[q] > thr) { first = q; break; }
     var lastTok = clamp(Math.round(W[W.length - 1].l * fps), 0, nf - 1), endF = lastTok;
     for (q = lastTok; q < Math.min(nf, lastTok + 200); q++) { if (eDb[q] > thr - 3) endF = q + 1; else if (q - endF > 24) break; }
@@ -584,9 +805,11 @@ function asrPieces(eDb, thr, lvl, hop) {
         var ta = a, tb = b;
         while (ta < tb - 4 && eDb[ta] < thr - 3) ta++;
         while (tb > ta + 4 && eDb[tb - 1] < thr - 3) tb--;
-        out.push({ a: ta, b: tb, gapL: ta > a || k == 0, gapR: tb < b || k == W.length - 1, text: W[k].w });
+        var pc0 = { a: ta, b: tb, gapL: ta > a || k == 0, gapR: tb < b || k == W.length - 1, text: W[k].w };
+        if (k == 0 || k == W.length - 1) dropIslands(pc0, eDb, thr, k == 0, k == W.length - 1);
+        out.push(pc0);
     }
-    // drop silent phantoms, glue fragments shorter than 50 ms to a neighbour ("to"+"night")
+    // drop silent phantoms, glue fragments shorter than 35 ms to a neighbour
     var res = [];
     for (k = 0; k < out.length; k++) {
         var pc = out[k], mx = -1e9;
@@ -607,7 +830,7 @@ function asrstatus() {
     var a = arrayfromargs(arguments), st = String(a[0]);
     asrState = st;
     var msg = a.slice(1).join(" ");
-    if (st == "ready") { installing = 0; installWarn.cancel(); outlet(1, "ai", 2); if (P.ai) { setStatus("AI words ready" + (msg ? " - " + msg : "")); if (feat) sendAsr(); } }
+    if (st == "ready") { installing = 0; installWarn.cancel(); outlet(1, "ai", 2); if (P.ai) { setStatus("AI words ready" + (msg ? " - " + msg : "")); if (feat && !asrList) sendAsr(); } }
     else if (st == "missing") { outlet(1, "ai", 0); if (P.ai) installAsr(); }
     else if (st == "busy") outlet(1, "ai", 1);
     else if (st == "error") { outlet(1, "ai", 0); if (P.ai) setStatus("AI words error: " + msg); }
@@ -622,13 +845,12 @@ var installWarn = new Task(function () {
 function installAsr() {
     if (installing) return;
     installing = 1;
-    setStatus("AI words: one-time install of the offline speech engine (~35 MB, 1-3 min)...");
+    setStatus("AI words: one-time install of the offline speech engine (1-3 min)...");
     outlet(2, "node", "script", "npm", "install");
     installWarn.schedule(240000);
 }
 
 function aistart() {
-    // called once at boot: start the node script (it reports ready / missing)
     outlet(2, "node", "script", "start");
 }
 
@@ -646,10 +868,13 @@ function asrwords() {
     var a = arrayfromargs(arguments);
     if (Number(a[0]) != asrId) return;
     var list = [];
-    for (var k = 1; k + 2 < a.length; k += 3) list.push({ t: Number(a[k]), l: Number(a[k + 1]), w: String(a[k + 2]).toLowerCase() });
+    for (var k = 1; k + 2 < a.length; k += 3) {
+        var w = String(a[k + 2]).toLowerCase();
+        if (w.length) list.push({ t: Number(a[k]), l: Number(a[k + 1]), w: w });
+    }
     if (!list.length) { setStatus("AI heard no words - using acoustic chop"); return; }
     asrList = list;
-    segment(); buildPads(); sendUI(); summary();
+    segment(); refreshAll(); summary();
 }
 
 function pieceMax(cv, a, b) {
@@ -666,6 +891,7 @@ function mergeWeak(list, bDb, btop, eDb) {
             var L = list[k], def = 0;
             var vb = btop - pieceMax(bDb, L.a, L.b);
             if (vb > T.vowelDb) def += vb - T.vowelDb + 1;
+            if (!voiced(L)) def += 6;
             if (L.b - L.a < minF) def += (minF - (L.b - L.a)) * 0.5 + 1;
             if (def > wScore) { wScore = def; worst = k; }
         }
@@ -673,6 +899,9 @@ function mergeWeak(list, bDb, btop, eDb) {
         // merge towards the neighbour with the smaller (or shallower) gap
         var cur = list[worst], left = worst > 0 ? list[worst - 1] : null, right = worst < list.length - 1 ? list[worst + 1] : null;
         var gl = left ? cur.a - left.b : 1e9, gr = right ? right.a - cur.b : 1e9;
+        // a click / breath / button noise standing apart from the words is dropped, never glued on:
+        // gluing it to the first word is what made words start with a silent gap
+        if (Math.min(gl, gr) * 5 >= T.dropGapMs && (!voiced(cur) || btop - pieceMax(bDb, cur.a, cur.b) > T.vowelDb || (cur.b - cur.a) * 5 < 50)) { list.splice(worst, 1); continue; }
         if (gl == gr && left && right) {
             gl = -Math.min(eDb[Math.max(0, cur.a - 1)], eDb[cur.a]);
             gr = -Math.min(eDb[Math.max(0, cur.b - 1)], eDb[Math.min(eDb.length - 1, cur.b)]);
@@ -684,34 +913,27 @@ function mergeWeak(list, bDb, btop, eDb) {
     return list;
 }
 
-function mkSlice(s, e, kind, wi, k, nk, hue) {
-    return { s: Math.max(0, Math.round(s)), e: Math.round(e), kind: kind, wi: wi, k: k, nk: nk, hue: hue,
-             pitch: undefined, tuneOff: 0, env: null };
-}
-
-function partsFromCuts(word, se) {
-    if (se.length <= 2) return [];
-    var out = [];
-    for (var q = 0; q < se.length - 1; q++) out.push(mkSlice(se[q], se[q + 1], "part", word.wi, q, se.length - 1, word.hue));
-    return out;
-}
-
-// merge the shortest neighbouring parts until count <= max
-function fitSubs(word, max) {
-    if (word.subs.length <= max) return word.subs;
-    var key = "fit" + max;
-    if (word[key]) return word[key];
-    var se = word.cuts.slice(0);
-    while (se.length - 1 > max) {
-        var bestQ = 1, bestL = 1e20;
-        for (var q = 1; q < se.length - 1; q++) {
-            var l = se[q + 1] - se[q - 1];
-            if (l < bestL) { bestL = l; bestQ = q; }
-        }
-        se.splice(bestQ, 1);
+// clicks / breaths sitting before (or after) a word inside the same piece, separated by a pause: cut them off
+function dropIslands(pc, eDb, thr, lead, tail) {
+    var runs = [], on = false, st = 0, k, gapF = Math.round(T.dropGapMs / 5);
+    for (k = pc.a; k < pc.b; k++) {
+        if (!on && eDb[k] > thr) { on = true; st = k; }
+        else if (on && eDb[k] < thr - 3) { on = false; runs.push([st, k]); }
     }
-    word[key] = partsFromCuts(word, se);
-    return word[key];
+    if (on) runs.push([st, pc.b]);
+    while (lead && runs.length > 1 && runs[1][0] - runs[0][1] >= gapF && !voiced({ a: runs[0][0], b: runs[0][1] })) { runs.shift(); pc.a = runs[0][0]; pc.gapL = true; }
+    while (tail && runs.length > 1 && runs[runs.length - 1][0] - runs[runs.length - 2][1] >= gapF && !voiced({ a: runs[runs.length - 1][0], b: runs[runs.length - 1][1] })) { runs.pop(); pc.b = runs[runs.length - 1][1]; pc.gapR = true; }
+}
+
+// a word has a voiced (periodic) nucleus; clicks, breaths and lone "s" / "t" don't
+function voiced(L) {
+    if (L.vc === undefined) L.vc = detectPitch(L.a * feat.hop, L.b * feat.hop) > 0 ? 1 : 0;
+    return L.vc;
+}
+
+function mkSlice(s, e, kind, wi, hue) {
+    return { s: Math.max(0, Math.round(s)), e: Math.round(e), kind: kind, wi: wi, hue: hue,
+             pitch: undefined, env: null, cloud: null };
 }
 
 function sliceEnv(sl) {
@@ -730,11 +952,26 @@ function sliceEnv(sl) {
     return out;
 }
 
+// sustain region for Cloud: the loudest voiced stretch (vowel) of the slice, in samples
+function cloudRegion(sl) {
+    if (sl.cloud) return sl.cloud;
+    var F = feat, s = sl.s, e = sl.e;
+    if (!F) return (sl.cloud = [s, e]);
+    var fa = Math.floor(s / F.hop), fb = Math.min(F.nf, Math.max(fa + 1, Math.floor(e / F.hop))), best = fa, bv = -1e9, k;
+    for (k = fa; k < fb; k++) if (F.bDb[k] > bv) { bv = F.bDb[k]; best = k; }
+    var a = best, b = best + 1;
+    while (a > fa && F.bDb[a - 1] > bv - 6) a--;
+    while (b < fb && F.bDb[b] > bv - 6) b++;
+    var minF = Math.round(0.08 * sr / F.hop);
+    while (b - a < minF && (a > fa || b < fb)) { if (a > fa) a--; if (b < fb) b++; }
+    sl.cloud = [Math.max(s, a * F.hop), Math.min(e, b * F.hop)];
+    return sl.cloud;
+}
+
 // ---------------------------------------------------------------- pitch (YIN)
 function ensurePitch(sl) {
     if (sl.pitch !== undefined) return sl.pitch;
     sl.pitch = detectPitch(sl.s, sl.e);
-    sl.tuneOff = sl.pitch > 0 ? nearestScaleOffset(sl.pitch) : 0;
     return sl.pitch;
 }
 
@@ -759,11 +996,11 @@ function detectPitch(s, e) {
         for (j = 0; j < D; j++) sum += raw[q * D + j] || 0;
         x.push(sum / D);
     }
-    var d = [0], dp = [1], run = 0, tau, diff, acc;
+    var dp = [1], run = 0, tau, diff, acc;
     for (tau = 1; tau <= tMax + 1; tau++) {
         acc = 0;
         for (q = 0; q < W; q++) { diff = x[q] - x[q + tau]; acc += diff * diff; }
-        d[tau] = acc; run += acc;
+        run += acc;
         dp[tau] = run > 0 ? acc * tau / run : 1;
     }
     var found = -1;
@@ -785,117 +1022,181 @@ function detectPitch(s, e) {
     return 69 + 12 * Math.log(f0 / 440) / Math.LN2;
 }
 
-function nearestScaleOffset(m) {
-    var best = 0, bd = 1e9, o, q, cand;
-    for (o = -1; o <= 1; o++) {
-        for (q = 0; q < scaleInts.length; q++) {
-            cand = (Math.floor(m / 12) + o) * 12 + ((scaleRoot + scaleInts[q]) % 12);
-            if (Math.abs(cand - m) < bd) { bd = Math.abs(cand - m); best = cand - m; }
+// nearest allowed note to m: key 0 = Live's scale, 1..12 = that single note (C..B)
+function nearestAllowed(m) {
+    var pcs = [];
+    if (P.key >= 1) pcs = [Math.round(P.key) - 1];
+    else for (var q = 0; q < scaleInts.length; q++) pcs.push((scaleRoot + scaleInts[q]) % 12);
+    var best = Math.round(m), bd = 1e9;
+    for (var o = -1; o <= 1; o++) {
+        for (var k = 0; k < pcs.length; k++) {
+            var cand = (Math.floor(m / 12) + o) * 12 + pcs[k];
+            if (Math.abs(cand - m) < bd) { bd = Math.abs(cand - m); best = cand; }
         }
     }
     return best;
 }
 
-function computeTunes() {
-    for (var k = 0; k < 64; k++) {
-        var sl = pads[k];
-        if (sl && sl.pitch !== undefined) sl.tuneOff = sl.pitch > 0 ? nearestScaleOffset(sl.pitch) : 0;
+// ---------------------------------------------------------------- text labels
+// Croatian / English syllables: vowels, plus syllabic r between consonants (prst, vrt)
+function syllables(t) {
+    var V = "aeiouy", nuc = [], i, ch;
+    t = String(t);
+    for (i = 0; i < t.length; i++) {
+        ch = t.charAt(i).toLowerCase();
+        if (V.indexOf(ch) >= 0) nuc.push(i);
+        else if (ch == "r") {
+            var pv = i > 0 ? t.charAt(i - 1).toLowerCase() : "", nx = i < t.length - 1 ? t.charAt(i + 1).toLowerCase() : "";
+            if ((pv === "" || V.indexOf(pv) < 0) && (nx === "" || V.indexOf(nx) < 0) && t.length > 1) nuc.push(i);
+        }
     }
+    // collapse adjacent vowels that form one nucleus (ie in "vrijeme" counts as i + je)
+    if (nuc.length < 2) return [t];
+    var cut = [];
+    for (i = 0; i < nuc.length - 1; i++) {
+        var a = nuc[i], b = nuc[i + 1], cl = b - a - 1;
+        if (cl <= 0) cut.push(b);
+        else if (cl == 1) cut.push(a + 1);
+        else cut.push(a + 2);
+    }
+    var out = [], st = 0;
+    for (i = 0; i < cut.length; i++) { out.push(t.substring(st, cut[i])); st = cut[i]; }
+    out.push(t.substring(st));
+    return out;
 }
 
-// ---------------------------------------------------------------- pad layout
-// pad index p = row*8 + col, row 0 = bottom (MIDI note = base + p)
-function rc(row, col) { return row * 8 + col; }
-function readingPad(i) { return rc(7 - Math.floor(i / 8), i % 8); }
-
-function buildPads() {
-    var k;
-    for (k = 0; k < 64; k++) pads[k] = null;
-    if (!words.length || P.mode == 3) return;
-    var W = words.length;
-    if (P.mode == 0 && W <= 16) {
-        var bands = W <= 8 ? 1 : 2, rows = 8 / bands, maxSub = rows - 1;
-        for (k = 0; k < W; k++) {
-            var band = Math.floor(k / 8), col = k % 8, top = 7 - band * rows;
-            pads[rc(top, col)] = words[k];
-            var subs = fitSubs(words[k], maxSub);
-            for (var q = 0; q < subs.length; q++) pads[rc(top - 1 - q, col)] = subs[q];
-        }
-    } else if (P.mode == 1) {
-        var list = [];
-        for (k = 0; k < W; k++) {
-            if (words[k].subs.length) list = list.concat(words[k].subs);
-            else list.push(words[k]);
-        }
-        for (k = 0; k < list.length && k < 64; k++) pads[readingPad(k)] = list[k];
-    } else {
-        for (k = 0; k < W && k < 64; k++) pads[readingPad(k)] = words[k];
+function restText(t, frac) {
+    var sy = syllables(t);
+    if (sy.length < 2) {
+        var k = clamp(Math.round(t.length * frac), 1, Math.max(1, t.length - 1));
+        return t.substring(k);
     }
-    for (k = 0; k < 64; k++) if (pads[k]) ensurePitch(pads[k]);
+    var best = 1, bd = 1e9;
+    for (var j = 1; j < sy.length; j++) {
+        var f = j / sy.length;
+        if (Math.abs(f - frac) < bd) { bd = Math.abs(f - frac); best = j; }
+    }
+    return sy.slice(best).join("");
 }
 
 function label(sl) {
-    if (sl.kind == "word") return (words[sl.wi] && words[sl.wi].text) ? words[sl.wi].text : "W" + (sl.wi + 1);
-    if (sl.kind == "phrase") return "ALL";
-    var t = words[sl.wi] && words[sl.wi].text;
-    if (t) return syllText(t, sl.k, sl.nk);
-    return (sl.wi + 1) + "abcdefghij".charAt(sl.k);
+    var w = words[sl.wi];
+    if (!w) return "";
+    if (sl.kind == "word") return w.text ? w.text : "W" + (sl.wi + 1);
+    if (w.text) return "-" + restText(w.text, sl.frac || 0.5);
+    return (sl.wi + 1) + "b";
 }
 
-// split a word's letters roughly into nk syllable-ish chunks (for labels only)
-function syllText(t, k, nk) {
-    if (nk <= 1) return t;
-    var v = "aeiouy", groups = [], cur = "", seenV = false, i, ch;
-    for (i = 0; i < t.length; i++) {
-        ch = t.charAt(i);
-        var isV = v.indexOf(ch) >= 0;
-        if (seenV && isV && cur.length && v.indexOf(cur.charAt(cur.length - 1)) < 0) {
-            // move the last consonant to the next group (ev-ery, hap-py)
-            var last = cur.charAt(cur.length - 1);
-            if (cur.length > 1) { groups.push(cur.substring(0, cur.length - 1)); cur = last; } else { groups.push(cur); cur = ""; }
-            seenV = false;
+// ---------------------------------------------------------------- pad surface
+// pad index p = row*8 + col, row 0 = bottom row (Push y = 7 - row)
+function rc(row, col) { return row * 8 + col; }
+
+function keyNoteAt(row, col) {
+    // in-key layout like Push: columns = scale steps, every row up = a 4th (3 steps)
+    var n = scaleInts.length, d = col + 3 * row;
+    var base = 72 + scaleRoot + 12 * P.octave;
+    while (base < KEY0) base += 12;
+    var note = base + Math.floor(d / n) * 12 + scaleInts[d % n];
+    return note > 127 ? -1 : note;
+}
+
+function buildSurface() {
+    var k, row, col;
+    for (k = 0; k < 64; k++) surf[k] = null;
+    if (P.layout == 0) {
+        for (row = 7; row >= 0; row -= 2) {
+            var q = (7 - row) / 2;
+            for (col = 0; col < 8; col++) {
+                var wi = q * 8 + col;
+                surf[rc(row, col)] = { t: "word", k: wi };
+                surf[rc(row - 1, col)] = { t: "rest", k: wi };
+            }
         }
-        cur += ch;
-        if (isV) seenV = true;
+        return;
     }
-    if (cur) groups.push(cur);
-    // merge/split to exactly nk chunks
-    while (groups.length > nk) {
-        var bi = 0, bl = 1e9;
-        for (i = 0; i < groups.length - 1; i++) if (groups[i].length + groups[i + 1].length < bl) { bl = groups[i].length + groups[i + 1].length; bi = i; }
-        groups.splice(bi, 2, groups[bi] + groups[bi + 1]);
+    for (col = 0; col < 8; col++) {
+        surf[rc(7, col)] = { t: "word", k: P.page * 8 + col };
+        surf[rc(6, col)] = { t: "rest", k: P.page * 8 + col };
     }
-    if (groups.length < nk) {
-        var L = t.length, start = Math.floor(L * k / nk), end = Math.floor(L * (k + 1) / nk);
-        return t.substring(start, Math.max(start + 1, end));
+    if (P.layout == 1) {
+        for (row = 0; row < 6; row++) for (col = 0; col < 8; col++) surf[rc(row, col)] = { t: "key", n: keyNoteAt(row, col) };
+    } else {
+        for (row = 2; row < 6; row++) for (col = 0; col < 8; col++) surf[rc(row, col)] = { t: "step", i: (5 - row) * 8 + col };
+        for (col = 0; col < 8; col++) surf[rc(1, col)] = { t: "spage", i: col };
+        for (col = 0; col < 4; col++) surf[rc(0, col)] = { t: "sres", i: col };
+        for (col = 4; col < 8; col++) surf[rc(0, col)] = { t: "slen", i: col - 4 };
     }
-    return groups[k];
 }
 
+function sliceOfRole(r) {
+    if (!r) return null;
+    if (r.t == "word") return words[r.k] || null;
+    if (r.t == "rest") return (words[r.k] && words[r.k].rest) ? words[r.k].rest : null;
+    return null;
+}
+
+function noteOfRole(r) {
+    if (!r) return -1;
+    if (r.t == "word") return r.k < NWORDS ? r.k : -1;
+    if (r.t == "rest") return r.k < NWORDS ? REST0 + r.k : -1;
+    if (r.t == "key") return r.n;
+    return -1;
+}
+
+function sliceForNote(n) {
+    if (n < 0 || n >= KEY0) return null;
+    if (n < REST0) return words[n] || null;
+    var w = words[n - REST0];
+    return w ? w.rest : null;
+}
+
+// pad message: pad <p> <type> <hue> <label> [env...]
+//   types: 0 empty, 1 word, 2 rest, 3 key, 4 key root, 5 key (no slice), 6 step on, 7 step off,
+//          8 step outside clip, 9 option on, 10 option off, 11 playhead
 function sendUI() {
     outlet(1, "begin");
+    var selPad = -1;
     for (var k = 0; k < 64; k++) {
-        if (P.mode == 3) {
-            var note = P.base + k, pc = ((note % 12) + 12) % 12;
-            var black = (pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10);
-            outlet(1, "pad", k, pc == 0 ? 4 : (black ? 5 : 3), 0, noteName(note));
-            continue;
+        var r = surf[k];
+        if (!r) { outlet(1, "pad", k, 0, 0, "-"); continue; }
+        if (r.t == "word" || r.t == "rest") {
+            var sl = sliceOfRole(r);
+            if (!sl) { outlet(1, "pad", k, 0, 0, "-"); continue; }
+            if (sl === sel) selPad = k;
+            outlet(1, ["pad", k, r.t == "word" ? 1 : 2, sl.hue, label(sl)].concat(sliceEnv(sl)));
+        } else if (r.t == "key") {
+            if (r.n < 0) { outlet(1, "pad", k, 0, 0, "-"); continue; }
+            var root = (((r.n - scaleRoot) % 12) + 12) % 12 == 0;
+            outlet(1, "pad", k, sel ? (root ? 4 : 3) : 5, sel ? sel.hue : 0, noteName(r.n));
+        } else if (r.t == "step") {
+            var gi = seq.page * 32 + r.i, beat = gi * SEQ_RES[seq.res];
+            if (beat >= seq.len) outlet(1, "pad", k, 8, 0, "");
+            else if (seq.pos == gi) outlet(1, "pad", k, 11, 0, "");
+            else {
+                var sn = seq.steps[r.i];
+                if (sn !== undefined) {
+                    var ss = sliceForNote(sn);
+                    outlet(1, "pad", k, 6, ss ? ss.hue : 0, ss ? label(ss) : String(sn));
+                } else outlet(1, "pad", k, 7, 0, (r.i % 4 == 0) ? String(Math.floor(gi * SEQ_RES[seq.res] / 4) + 1) + "." + ((gi * SEQ_RES[seq.res]) % 4 + 1) : "");
+            }
+        } else if (r.t == "spage") {
+            var pageBeats = 32 * SEQ_RES[seq.res];
+            outlet(1, "pad", k, r.i == seq.page ? 9 : (r.i * pageBeats < seq.len ? 10 : 0), 0, "P" + (r.i + 1));
+        } else if (r.t == "sres") {
+            outlet(1, "pad", k, r.i == seq.res ? 9 : 10, 0, ["1/32", "1/16", "1/8", "1/4"][r.i]);
+        } else if (r.t == "slen") {
+            outlet(1, "pad", k, SEQ_LEN[r.i] * 4 == seq.len ? 9 : 10, 0.08, SEQ_LEN[r.i] + " bar");
         }
-        var sl = pads[k];
-        if (!sl) { outlet(1, "pad", k, 0, 0, "-"); continue; }
-        outlet(1, ["pad", k, sl.kind == "word" ? 1 : 2, sl.hue, label(sl)].concat(sliceEnv(sl)));
     }
+    outlet(1, "selpad", selPad);
     var reg = ["regions"];
     for (k = 0; k < words.length; k++) reg.push(frac(words[k].s), frac(words[k].e), words[k].hue, label(words[k]));
     outlet(1, reg);
     var mk = ["marks"];
-    for (k = 0; k < words.length; k++) {
-        var c = words[k].cuts;
-        for (var q = 1; q < c.length - 1; q++) mk.push(frac(c[q]));
-    }
+    for (k = 0; k < words.length; k++) for (var q = 0; q < words[k].cuts.length; q++) mk.push(frac(words[k].cuts[q]));
     outlet(1, mk);
-    var ks = keySlice || phrase;
-    if (P.mode == 3 && ks) outlet(1, "sel", frac(ks.s), frac(ks.e)); else outlet(1, "sel", -1, -1);
+    if (sel) outlet(1, "sel", frac(sel.s), frac(sel.e)); else outlet(1, "sel", -1, -1);
+    outlet(1, "mode", P.layout);
     outlet(1, "refresh");
 }
 
@@ -905,55 +1206,62 @@ function sendWave() {
 
 function frac(s) { return nFrames > 0 ? Math.round((s / nFrames) * 10000) / 10000 : 0; }
 
-// ---------------------------------------------------------------- playing
+// ---------------------------------------------------------------- input from pads / MIDI
+// MIDI from the track (Push in note mode, keyboards, clips playing back)
 function note(n, vel) {
     n = Number(n); vel = Number(vel);
-    if (vel > 0) noteOn(n, vel, 0); else noteOff(n);
+    if (vel > 0) noteOn(n, vel); else noteOff(n);
 }
 
-function padclick(p, v) {
-    p = Number(p); v = Number(v);
-    if (p < 0 || p > 63) return;
-    if (v > 0) noteOn(P.base + p, v, 1); else noteOff(P.base + p);
-}
-
-function noteOn(n, vel, fromUI) {
-    if (learning && !fromUI) {
-        learning = 0;
-        var b = clamp(n, 0, 64);
-        P.base = b;
-        outlet(2, "setbase", b);
-        outlet(1, "base", b);
-        setStatus("Pads start at " + noteName(b) + " - bottom-left pad = note " + b);
-        sendUI();
-        return;
+// pads: on-screen grid or Push pads taken over by VoChop
+function padclick(pd, v) {
+    pd = Number(pd); v = Number(v);
+    if (pd < 0 || pd > 63) return;
+    var r = surf[pd];
+    if (v > 0) {
+        if (!r) return;
+        if (r.t == "step") { if (P.layout == 2) seqToggle(r.i); return; }
+        if (r.t == "spage") { seq.page = r.i; seqRefresh(); return; }
+        if (r.t == "sres") { seq.res = r.i; seq.page = 0; seqRefresh(); return; }
+        if (r.t == "slen") { seqSetLen(SEQ_LEN[r.i] * 4); return; }
+        var n = noteOfRole(r);
+        if (n < 0) {
+            // words beyond 32 (no MIDI note): play directly
+            var sl = sliceOfRole(r);
+            if (sl) { sel = sl; triggerChop(sl, 1000 + pd, v, pd); }
+            return;
+        }
+        padNote[pd] = n;
+        noteOn(n, v);
+        recOn(n, v);
+    } else {
+        var on = padNote[pd];
+        padNote[pd] = -1;
+        if (on >= 0) { noteOff(on); recOff(on); }
+        else noteOff(1000 + pd);
     }
+}
+
+function noteOn(n, vel) {
     if (!nFrames || !words.length) {
         if (!recording) setStatus("Nothing to play yet - record or drop audio first");
         return;
     }
-    var sl, semis, p = n - P.base;
-    if (P.mode == 3) {
-        sl = keySlice || phrase;
+    if (n < KEY0) {
+        var sl = sliceForNote(n);
         if (!sl) return;
+        var changed = sel !== sl;
+        sel = sl;
+        triggerChop(sl, n, vel, padsForNote(n));
         var pt = ensurePitch(sl);
-        semis = (P.tune && pt > 0) ? (n - pt) : (n - 60);
-        semis += P.pitch + bendSemis;
-        trigger(sl, n, vel, semis, (p >= 0 && p < 64) ? p : -1);
-        setInfo("Keys: " + (sl.kind == "phrase" ? "whole phrase" : label(sl)) + "  ->  " + noteName(n) +
-            ((P.tune && pt > 0) ? "  (tuned)" : ""));
+        setInfo(label(sl) + "   " + fmtSec(sl.e - sl.s) + (pt > 0 ? "   ~" + noteName(pt) : "") + "   note " + n);
+        if (changed && P.layout == 1) sendUI();
+        else if (changed) outlet(1, "selpad", padOfSlice(sl));
         return;
     }
-    if (p < 0 || p > 63) return;
-    sl = pads[p];
-    if (!sl) return;
-    keySlice = sl;
-    semis = P.pitch + bendSemis + (P.snap ? sl.tuneOff : 0);
-    trigger(sl, n, vel, semis, p);
-    var pt2 = ensurePitch(sl);
-    var info = (sl.kind == "word" ? "Word " + (sl.wi + 1) : "Word " + (sl.wi + 1) + "  part " + (sl.k + 1) + "/" + sl.nk) +
-        "   " + fmtSec(sl.e - sl.s) + (pt2 > 0 ? "   ~" + noteName(pt2) : "") + "   note " + n;
-    setInfo(info);
+    var src = sel || words[0];
+    triggerKey(src, n, vel, padsForNote(n));
+    setInfo(label(src) + "  ->  " + noteName(n));
 }
 
 function noteOff(n) {
@@ -962,28 +1270,42 @@ function noteOff(n) {
         var v = voices[k];
         if (v.busy && v.note == n && v.held) {
             v.held = 0;
-            if (P.trig == 1 || v.loop) {
-                outlet(0, k, "ev", 0, Math.max(2, P.release));
+            if (v.keep) {
+                voiceMsg(k, "gate", 0);
                 v.relT = t;
-                hit(v.pad, 0);
+                hitPads(v.pad, 0);
             }
         }
     }
 }
 
+function padsForNote(n) {
+    var out = [];
+    for (var k = 0; k < 64; k++) if (noteOfRole(surf[k]) == n) out.push(k);
+    return out;
+}
+
+function padOfSlice(sl) {
+    for (var k = 0; k < 64; k++) if (surf[k] && sliceOfRole(surf[k]) === sl) return k;
+    return -1;
+}
+
 function allNotesOff() {
     for (var k = 0; k < NV; k++) {
         if (voices[k].busy) {
-            outlet(0, k, "ev", 0, 10);
+            killVoice(k);
             voices[k].busy = 0; voices[k].held = 0;
-            hit(voices[k].pad, 0);
+            hitPads(voices[k].pad, 0);
         }
     }
 }
 
-function stutterMs() {
-    var b = STUTTER_BEATS[clamp(Math.round(P.stutter), 0, STUTTER_BEATS.length - 1)];
-    return b > 0 ? b * 60000 / clamp(tempo, 20, 999) : 0;
+// ---------------------------------------------------------------- voices
+function voiceMsg(k, name, v) { outlet(0, k, "g", name, v); }
+
+function killVoice(k) {
+    voices[k].kill++;
+    voiceMsg(k, "kill", voices[k].kill);
 }
 
 function allocVoice() {
@@ -996,139 +1318,416 @@ function allocVoice() {
     return best < 0 ? 0 : best;
 }
 
-function trigger(sl, n, vel, semis, padIdx) {
+function repeatMs() {
+    var b = RATE_BEATS[clamp(Math.round(P.rate), 0, RATE_BEATS.length - 1)];
+    return b * 60000 / clamp(tempo, 20, 999);
+}
+
+// word / rest pads: classic chopper (choke by default)
+function triggerChop(sl, n, vel, pads) {
     if (P.choke) {
-        for (var c = 0; c < NV; c++) if (voices[c].busy) {
-            outlet(0, c, "ev", 0, 12);
-            voices[c].held = 0; voices[c].loop = 0; voices[c].relT = now() - 100000;
-            hit(voices[c].pad, 0);
+        for (var c = 0; c < NV; c++) if (voices[c].busy && voices[c].chop) {
+            killVoice(c);
+            voices[c].held = 0; voices[c].keep = 0; voices[c].chop = 0; voices[c].relT = now();
+            hitPads(voices[c].pad, 0);
         }
     }
+    var mode = [0, 0, 1, 3][clamp(Math.round(P.pads), 0, 3)];
+    var semis = P.pitch + bendSemis, tune = null;
+    var pt = ensurePitch(sl);
+    if (P.atune > 0 && pt > 0) tune = { hz: mtof(nearestAllowed(pt + semis)), amt: P.atune };
+    startVoice(sl, n, vel, Math.pow(2, clamp(semis, -48, 48) / 12), mode, P.pads != 0, tune, pads, 1);
+}
+
+// keys: the selected slice, tuned to the played note (nearest octave around C5-B5)
+function triggerKey(sl, n, vel, pads) {
+    var pt = ensurePitch(sl);
+    var oct = Math.floor((n - HOME) / 12) * 12, pc = ((n % 12) + 12) % 12;
+    var mode = [2, 1, 3, 0][clamp(Math.round(P.keys), 0, 3)];
+    var rate = 1, tune = null;
+    if (pt > 0) {
+        var m = pt + P.pitch + bendSemis;
+        var near = m + ((((pc - Math.round(m)) % 12) + 18) % 12 - 6) + (Math.round(m) - m);
+        var target = near + oct;
+        tune = { hz: mtof(target), amt: 100 };
+        // big jumps: move most of the octave with the playback rate, retune~ does the rest
+        if (Math.abs(target - pt) > 7) rate = Math.pow(2, Math.round((target - pt) / 12) * 12 / 12);
+    } else {
+        rate = Math.pow(2, clamp((((pc + 6) % 12) - 6) + oct + P.pitch, -36, 36) / 12);
+    }
+    startVoice(sl, n, vel, rate, mode, mode != 0, tune, pads, 0);
+}
+
+function startVoice(sl, n, vel, rate, mode, keep, tune, pads, chop) {
     var vi = allocVoice(), v = voices[vi];
-    if (v.busy) hit(v.pad, 0);
-    var startMs = sl.s / sr * 1000, lenMs = (sl.e - sl.s) / sr * 1000;
-    if (lenMs < 3) return;
-    var rate = Math.pow(2, clamp(semis, -48, 48) / 12);
-    var looping = (P.trig == 2);
-    var seg = lenMs, stm = stutterMs();
-    if (stm > 0) { seg = Math.min(lenMs, stm * rate); looping = true; }
-    var dur = seg / rate;
-    var off = P.reverse ? startMs + seg : startMs;
-    var len = P.reverse ? -seg : seg;
-    var fade = Math.min(looping ? 3 : 6, dur * 0.2);
-    var up = clamp(fade / dur, 0.0005, 0.45), down = clamp(1 - (fade * (P.reverse ? 1 : 1.5)) / dur, 0.55, 0.9995);
+    if (v.busy) hitPads(v.pad, 0);
+    var s0 = ms(sl.s), s1 = ms(sl.e);
+    if (s1 - s0 < 3) return;
+    var cr = cloudRegion(sl);
     var vs = clamp(P.vel / 100, 0, 1);
     var amp = ((1 - vs) + vs * Math.pow(clamp(vel, 1, 127) / 127, 1.6)) * normGain * 0.8;
     var pan = ((vi % 2) ? 1 : -1) * clamp(P.spread / 100, 0, 1) * (0.35 + 0.65 * ((vi * 0.37) % 1));
     var ang = (pan + 1) * Math.PI / 4;
-    outlet(0, vi, "ln", len);
-    outlet(0, vi, "of", off);
-    outlet(0, vi, "tz", up, down);
+    if (tune) { outlet(0, vi, "t", tune.hz); outlet(0, vi, "c", tune.amt); outlet(0, vi, "r", 1); }
+    else { outlet(0, vi, "r", 0); outlet(0, vi, "t", 0); }
     outlet(0, vi, "pn", Math.cos(ang), Math.sin(ang));
-    outlet(0, vi, "ev", 0, 0, amp, Math.max(0.5, P.attack));
-    outlet(0, vi, "ph", 0, 0, 1, dur);
-    v.busy = 1; v.note = n; v.held = 1; v.t = now(); v.relT = 0; v.loop = looping ? 1 : 0; v.dur = dur; v.pad = padIdx;
-    hit(padIdx, 1);
+    voiceMsg(vi, "s0", s0);
+    voiceMsg(vi, "s1", s1);
+    voiceMsg(vi, "cs0", ms(cr[0]));
+    voiceMsg(vi, "cs1", ms(cr[1]));
+    voiceMsg(vi, "rate", rate);
+    voiceMsg(vi, "mode", mode);
+    voiceMsg(vi, "rev", (P.reverse && chop) ? 1 : 0);
+    voiceMsg(vi, "amp", amp);
+    voiceMsg(vi, "att", Math.max(0.5, P.attack));
+    voiceMsg(vi, "rel", Math.max(5, P.release));
+    voiceMsg(vi, "gsz", clamp(P.grain, 20, 500));
+    voiceMsg(vi, "rlen", Math.max(15, repeatMs() * rate));
+    voiceMsg(vi, "fade", mode == 0 ? 5 : 3);
+    voiceMsg(vi, "gate", 1);
+    v.trig++;
+    voiceMsg(vi, "trig", v.trig);
+    v.busy = 1; v.note = n; v.held = 1; v.t = now(); v.relT = 0; v.keep = keep ? 1 : 0; v.pad = pads; v.chop = chop;
+    hitPads(pads, 1);
     outlet(1, "play", frac(sl.s), frac(sl.e));
 }
 
-// end of a phase ramp (from line~ bang)
+// end of a voice (gen~ done flag)
 function vend(k) {
     k = Number(k);
     var v = voices[k];
     if (!v || !v.busy) return;
-    if (v.loop && v.held) { outlet(0, k, "ph", 0, 0, 1, v.dur); return; }
     v.busy = 0; v.held = 0;
-    outlet(0, k, "ev", 0, 2);
-    hit(v.pad, 0);
+    hitPads(v.pad, 0);
 }
 
-function hit(p, on) {
-    if (p === undefined || p < 0 || p > 63) return;
-    outlet(1, "hit", p, on ? 1 : 0);
+function hitPads(pads, on) {
+    if (pads === undefined || pads === null) return;
+    if (typeof pads == "number") pads = [pads];
+    for (var q = 0; q < pads.length; q++) {
+        var pd = pads[q];
+        if (pd >= 0 && pd <= 63) outlet(1, "hit", pd, on ? 1 : 0);
+    }
 }
 
-// click on the waveform: select a word for Keys mode and audition it
+// click on the waveform: select a word and audition it
 function waveclick(f) {
     f = Number(f);
     if (!nFrames) return;
-    var s = f * nFrames, sel = phrase;
-    for (var k = 0; k < words.length; k++) if (s >= words[k].s && s < words[k].e) { sel = words[k]; break; }
-    if (!sel) return;
-    keySlice = sel;
-    ensurePitch(sel);
-    var pt = sel.pitch;
-    trigger(sel, -999, 100, P.pitch, -1);
+    var s = f * nFrames, pick = null;
+    for (var k = 0; k < words.length; k++) if (s >= words[k].s && s < words[k].e) { pick = words[k]; break; }
+    if (!pick) return;
+    sel = pick;
+    triggerChop(pick, -999, 100, padOfSlice(pick));
     for (var q = 0; q < NV; q++) if (voices[q].note == -999) voices[q].held = 0;
-    setInfo("Selected " + (sel.kind == "phrase" ? "whole phrase" : label(sel)) + (pt > 0 ? "  ~" + noteName(pt) : "") +
-        "  (Keys mode plays this)");
-    if (P.mode == 3) sendUI();
+    setInfo("Selected " + label(pick) + " - the keys play this word");
+    sendUI();
 }
 
-// ---------------------------------------------------------------- MIDI clip export
+// ---------------------------------------------------------------- clips
+function trackApi() {
+    if (!trackPath) findTrack();
+    if (!trackPath) return null;
+    return new LiveAPI(null, trackPath);
+}
+
+function clipAt(slotIdx) {
+    if (slotIdx < 0) return null;
+    var cs = new LiveAPI(null, trackPath + " clip_slots " + slotIdx);
+    if (Number(cs.get("has_clip")) != 1) return null;
+    return new LiveAPI(null, trackPath + " clip_slots " + slotIdx + " clip");
+}
+
+// the clip to record / sequence into: playing clip, else the highlighted slot of this track
+function targetClip(create) {
+    var tr = trackApi();
+    if (!tr) return null;
+    var ps = Number(tr.get("playing_slot_index"));
+    var c = clipAt(ps);
+    if (c) return c;
+    var hs = -1;
+    try {
+        var hv = new LiveAPI(null, "live_set view highlighted_clip_slot");
+        var hp = String(hv.unquotedpath || "");
+        if (hp.indexOf(trackPath + " clip_slots ") == 0) hs = Number(hp.substring((trackPath + " clip_slots ").length));
+    } catch (e) { hs = -1; }
+    c = clipAt(hs);
+    if (c) return c;
+    if (!create) return null;
+    var slot = hs;
+    if (slot < 0) {
+        var ns = tr.getcount("clip_slots");
+        for (var k = 0; k < ns; k++) { if (!clipAt(k)) { slot = k; break; } }
+    }
+    if (slot < 0) return null;
+    var csa = new LiveAPI(null, trackPath + " clip_slots " + slot);
+    csa.call("create_clip", seq.len);
+    c = new LiveAPI(null, trackPath + " clip_slots " + slot + " clip");
+    c.set("name", "VoChop");
+    return c;
+}
+
+function addNotes(clip, notes) {
+    var ok = false;
+    try {
+        clip.call("add_new_notes", { notes: notes });
+        ok = true;
+    } catch (e1) { ok = false; }
+    if (!ok) {
+        try {
+            clip.call("set_notes");
+            clip.call("notes", notes.length);
+            for (var k = 0; k < notes.length; k++)
+                clip.call("note", notes[k].pitch, notes[k].start_time.toFixed(4), notes[k].duration.toFixed(4), notes[k].velocity, 0);
+            clip.call("done");
+            ok = true;
+        } catch (e2) { post("VoChop: add notes failed " + e2 + "\n"); }
+    }
+    return ok;
+}
+
+function getNotes(clip, fromPitch, span, fromTime, timeSpan) {
+    try {
+        var d = parseJson(clip.call("get_notes_extended", fromPitch, span, fromTime, timeSpan));
+        return (d && d.notes) ? d.notes : [];
+    } catch (e) { return []; }
+}
+
+// ---- recording pad presses into the clip (pads taken over by VoChop never reach the track)
+function recArmed(clip) {
+    try {
+        if (Number(clip.get("is_recording")) == 1) return true;
+        var song = new LiveAPI(null, "live_set");
+        if (Number(song.get("session_record")) != 1) return false;
+        var tr = trackApi();
+        return tr && Number(tr.get("arm")) == 1 && Number(clip.get("is_playing")) == 1;
+    } catch (e) { return false; }
+}
+
+function recOn(n, vel) {
+    if (!trackPath) return;
+    var clip = targetClip(false);
+    if (!clip || !recArmed(clip)) return;
+    var pos = Number(clip.get("playing_position"));
+    recNotes[n] = { clip: Number(clip.id), pos: pos, t: now(), vel: vel };
+}
+
+function recOff(n) {
+    var r = recNotes[n];
+    if (!r) return;
+    delete recNotes[n];
+    var clip = new LiveAPI(null, "id " + r.clip);
+    var dur = Math.max(0.0625, (now() - r.t) / 60000 * tempo);
+    var nt = { pitch: n, start_time: Math.max(0, r.pos), duration: dur, velocity: r.vel, mute: 0 };
+    addNotes(clip, [nt]);
+    recPending.push({ clip: r.clip, note: nt });
+    recTaskCheck.cancel(); recTaskCheck.schedule(600);
+}
+
+// a clip that is still being recorded can drop notes added by the API: re-add them afterwards
+function recCheck() {
+    var keep = [];
+    for (var k = 0; k < recPending.length; k++) {
+        var r = recPending[k], clip = new LiveAPI(null, "id " + r.clip);
+        if (!clip || Number(clip.id) == 0) continue;
+        if (Number(clip.get("is_recording")) == 1) { keep.push(r); continue; }
+        var nt = r.note, found = getNotes(clip, nt.pitch, 1, Math.max(0, nt.start_time - 0.01), 0.02);
+        if (!found.length) addNotes(clip, [nt]);
+    }
+    recPending = keep;
+    if (recPending.length) recTaskCheck.schedule(600);
+}
+
+// ---- step sequencer
+function seqEnter() {
+    seqRefresh();
+    seqTask.cancel();
+    seqTask.interval = 80;
+    seqTask.repeat();
+}
+
+function seqStepBeat(i) { return (seq.page * 32 + i) * SEQ_RES[seq.res]; }
+
+function seqRefresh() {
+    seq.steps = [];
+    var clip = targetClip(false);
+    if (clip) {
+        seq.len = Number(clip.get("loop_end")) - Number(clip.get("loop_start"));
+        if (!(seq.len > 0)) seq.len = 8;
+        var st = seqStepBeat(0), span = 32 * SEQ_RES[seq.res];
+        var notes = getNotes(clip, 0, KEY0, st, span);
+        for (var k = 0; k < notes.length; k++) {
+            var i = Math.round((Number(notes[k].start_time) - st) / SEQ_RES[seq.res]);
+            if (i >= 0 && i < 32 && seq.steps[i] === undefined) seq.steps[i] = Number(notes[k].pitch);
+        }
+    }
+    buildSurface(); sendUI();
+}
+
+function seqToggle(i) {
+    var clip = targetClip(true);
+    if (!clip) { setStatus("No clip slot free on this track"); return; }
+    var beat = seqStepBeat(i), res = SEQ_RES[seq.res];
+    if (beat >= seq.len) { setInfo("Step is past the clip end - pick a longer length in the bottom row"); return; }
+    var ex = getNotes(clip, 0, KEY0, beat - 0.001, res);
+    if (ex.length) {
+        try { clip.call("remove_notes_extended", 0, KEY0, beat - 0.001, res); } catch (e) { }
+    } else {
+        var n = sel ? (sel.kind == "word" ? sel.wi : REST0 + sel.wi) : 0;
+        if (n >= KEY0) return;
+        var steps = sel ? Math.max(1, Math.round((sel.e - sel.s) / sr * tempo / 60 / res)) : 1;
+        addNotes(clip, [{ pitch: n, start_time: beat, duration: steps * res, velocity: 100, mute: 0 }]);
+    }
+    seqRefresh();
+}
+
+function seqSetLen(beats) {
+    var clip = targetClip(true);
+    if (!clip) return;
+    try {
+        clip.set("loop_end", Number(clip.get("loop_start")) + beats);
+        clip.set("end_marker", Number(clip.get("loop_start")) + beats);
+    } catch (e) { }
+    seq.len = beats;
+    seqRefresh();
+}
+
+function seqTick() {
+    if (P.layout != 2) { seqTask.cancel(); return; }
+    var clip = null, pos = -1;
+    try {
+        var tr = trackApi();
+        if (tr) clip = clipAt(Number(tr.get("playing_slot_index")));
+        if (clip && Number(clip.get("is_playing")) == 1) pos = Number(clip.get("playing_position"));
+    } catch (e) { clip = null; }
+    var st = -1;
+    if (pos >= 0) {
+        var gi = Math.floor(pos / SEQ_RES[seq.res]);
+        if (Math.floor(gi / 32) == seq.page) st = gi;
+    }
+    if (st != seq.pos) { seq.pos = st; sendUI(); }
+}
+
+// ---------------------------------------------------------------- MIDI clip of the phrase
 function makeclip(v) {
-    if (v === 0) return;
+    if (Number(v) === 0) return;
     if (!words.length) { setStatus("Nothing to put in a clip yet"); return; }
-    var evs = [], k, p;
-    for (p = 0; p < 64; p++) {
-        var sl = pads[p];
-        if (!sl) continue;
-        if (P.mode == 0 && sl.kind != "word") continue;
-        evs.push({ s: sl.s, e: sl.e, pitch: P.base + p });
-    }
-    if (P.mode == 3) {
-        setStatus("Make Clip works in the Words / Syllables / Word List modes");
-        return;
-    }
-    evs.sort(function (a, b) { return a.s - b.s; });
-    if (!evs.length) return;
-    var bps = clamp(tempo, 20, 999) / 60, t0 = evs[0].s, notes = [];
-    for (k = 0; k < evs.length; k++) {
-        var st = Math.round(((evs[k].s - t0) / sr) * bps * 4) / 4;
-        var du = Math.max(0.25, Math.round(((evs[k].e - evs[k].s) / sr) * bps * 4) / 4);
-        notes.push({ pitch: evs[k].pitch, start_time: st, duration: du, velocity: 100, mute: 0 });
+    var bps = clamp(tempo, 20, 999) / 60, t0 = words[0].s, notes = [], k;
+    for (k = 0; k < words.length && k < NWORDS; k++) {
+        var st = Math.round(((words[k].s - t0) / sr) * bps * 4) / 4;
+        var du = Math.max(0.25, Math.round(((words[k].e - words[k].s) / sr) * bps * 4) / 4);
+        notes.push({ pitch: k, start_time: st, duration: du, velocity: 100, mute: 0 });
     }
     var end = notes[notes.length - 1].start_time + notes[notes.length - 1].duration;
     var len = Math.max(4, Math.ceil(end / 4) * 4);
     try {
-        var tr = new LiveAPI(null, "this_device canonical_parent");
-        var guard = 0;
-        while (tr && String(tr.type) != "Track" && guard < 8) {
-            tr = new LiveAPI(null, tr.unquotedpath + " canonical_parent");
-            guard++;
-        }
-        if (!tr || String(tr.type) != "Track") { setStatus("Could not find this track"); return; }
-        var nslots = tr.getcount("clip_slots"), slot = null, si = -1;
-        for (k = 0; k < nslots; k++) {
-            var cs = new LiveAPI(null, tr.unquotedpath + " clip_slots " + k);
-            if (Number(cs.get("has_clip")) == 0) { slot = cs; si = k; break; }
-        }
-        if (!slot) { setStatus("No empty clip slot on this track"); return; }
-        slot.call("create_clip", len);
-        var clip = new LiveAPI(null, slot.unquotedpath + " clip");
+        var tr = trackApi();
+        if (!tr) { setStatus("Could not find this track"); return; }
+        var nslots = tr.getcount("clip_slots"), slot = -1;
+        for (k = 0; k < nslots; k++) if (!clipAt(k)) { slot = k; break; }
+        if (slot < 0) { setStatus("No empty clip slot on this track"); return; }
+        new LiveAPI(null, trackPath + " clip_slots " + slot).call("create_clip", len);
+        var clip = new LiveAPI(null, trackPath + " clip_slots " + slot + " clip");
         clip.set("name", "VoChop phrase");
-        var ok = false;
-        try {
-            clip.call("add_new_notes", { notes: notes });
-            var chk = clip.call("get_notes_extended", 0, 128, 0, len);
-            ok = String(chk).indexOf("pitch") >= 0;
-        } catch (e1) { ok = false; }
-        if (!ok) {
-            // legacy note API (still present in Live 11/12)
-            clip.call("set_notes");
-            clip.call("notes", notes.length);
-            for (k = 0; k < notes.length; k++)
-                clip.call("note", notes[k].pitch, notes[k].start_time.toFixed(4), notes[k].duration.toFixed(4), 100, 0);
-            clip.call("done");
-        }
-        setStatus("MIDI clip created in slot " + (si + 1) + " (" + notes.length + " notes) - fire it!");
+        addNotes(clip, notes);
+        setStatus("MIDI clip created in slot " + (slot + 1) + " (" + notes.length + " words) - fire it!");
     } catch (e) {
         setStatus("Make Clip failed: " + e);
     }
 }
 
+// ---------------------------------------------------------------- Push parameter banks (display + buttons above it)
+var BANKS = [
+    ["Main", ["Layout", "Keys", "AutoTune", "Key", "Pitch", "Attack", "Release", "Volume"]],
+    ["FX", ["Reverb", "Size", "Delay", "Time", "Feedback", "Crush", "Drive", "Cutoff"]],
+    ["Chop", ["Pads", "Grain", "Rate", "Choke", "Spread", "Poly", "Words", "Syllables"]]
+];
+var BANK_BUTTONS = ["Rec", "Undo", "Layout", "Page", "OctDown", "OctUp", "Keys", "Choke"];
+
+function bankmsg() {
+    var a = arrayfromargs(arguments);
+    if (String(a[0]) != "count") return;
+    var have = Number(a[1]) || 0;
+    for (var b = 0; b < BANKS.length; b++) {
+        var m;
+        if (b < have) {
+            m = ["banks", "edit", b, BANKS[b][0]];
+            for (var q = 0; q < 8; q++) m.push(q, BANKS[b][1][q]);
+            m.push("@buttons");
+            for (q = 0; q < 8; q++) m.push(q, BANK_BUTTONS[q]);
+        } else {
+            m = ["banks", "new", b, BANKS[b][0]].concat(BANKS[b][1]).concat(["@buttons"]).concat(BANK_BUTTONS);
+        }
+        outlet(2, m);
+    }
+}
+
+// ---------------------------------------------------------------- own audio input (Audio From)
+function inputsRefresh() {
+    inIO = null; inTypes = []; inChans = [];
+    try {
+        var dev = new LiveAPI(null, "this_device");
+        var n = dev.getcount("audio_inputs");
+        post("VoChop: device audio inputs: " + n + "\n");
+        if (n < 1) { outlet(2, "inmenu", "clear"); outlet(2, "inmenu", "append", "(no input - use VoChop Input)"); return; }
+        inIO = new LiveAPI(null, "this_device audio_inputs " + (n - 1));
+        var d = parseJson(inIO.get("available_routing_types"));
+        inTypes = (d && d.available_routing_types) ? d.available_routing_types : [];
+        outlet(2, "inmenu", "clear");
+        var cur = parseJson(inIO.get("routing_type")), ci = 0;
+        for (var k = 0; k < inTypes.length; k++) {
+            outlet(2, "inmenu", "append", String(inTypes[k].display_name));
+            if (cur && cur.routing_type && cur.routing_type.identifier == inTypes[k].identifier) ci = k;
+        }
+        outlet(2, "inmenu", "set", ci);
+        chansRefresh();
+    } catch (e) { post("VoChop: audio input routing not available: " + e + "\n"); }
+}
+
+function chansRefresh() {
+    if (!inIO) return;
+    var d = parseJson(inIO.get("available_routing_channels"));
+    inChans = (d && d.available_routing_channels) ? d.available_routing_channels : [];
+    outlet(2, "chmenu", "clear");
+    var cur = parseJson(inIO.get("routing_channel")), ci = 0;
+    for (var k = 0; k < inChans.length; k++) {
+        outlet(2, "chmenu", "append", String(inChans[k].display_name));
+        if (cur && cur.routing_channel && cur.routing_channel.identifier == inChans[k].identifier) ci = k;
+    }
+    outlet(2, "chmenu", "set", ci);
+}
+
+function setRouting(prop, item) {
+    var tries = [
+        function () { inIO.set(prop, JSON.stringify({ identifier: item.identifier })); },
+        function () { inIO.set(prop, JSON.stringify(item)); },
+        function () { var o = {}; o[prop] = { identifier: item.identifier }; inIO.set(prop, JSON.stringify(o)); },
+        function () { inIO.set(prop, item.identifier); }
+    ];
+    for (var k = 0; k < tries.length; k++) {
+        try { tries[k](); } catch (e) { }
+        var cur = parseJson(inIO.get(prop));
+        if (cur && cur[prop] && cur[prop].identifier == item.identifier) return true;
+    }
+    post("VoChop: could not set " + prop + " to " + item.display_name + "\n");
+    return false;
+}
+
+function insel(idx) {
+    idx = Number(idx);
+    if (!inIO || !inTypes[idx]) { inputsRefresh(); return; }
+    if (setRouting("routing_type", inTypes[idx])) setStatus("Audio from: " + inTypes[idx].display_name + " - press REC and speak");
+    chansRefresh();
+}
+
+function chsel(idx) {
+    idx = Number(idx);
+    if (!inIO || !inChans[idx]) return;
+    setRouting("routing_channel", inChans[idx]);
+}
+
 function pushstate(v) {
-    setStatus(Number(v) ? "PUSH PADS on: Push pads show the chop colours" : "PUSH PADS off (or no Push found) - notes still work");
+    setStatus(Number(v) ? "Push pads: VoChop layout (select another track to give them back)" : "Push pads released");
 }
 
 function anything() {
