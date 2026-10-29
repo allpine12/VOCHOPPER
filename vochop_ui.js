@@ -110,13 +110,14 @@ function padColor(p) {
         case 2: c = hsl(p.h, 0.50, 0.31); break;            // rest of the word
         case 3: c = [0.30, 0.32, 0.36]; break;              // key in scale
         case 4: c = hsl(p.h, 0.78, 0.56); break;            // root key (colour of the selected word)
-        case 5: c = [0.19, 0.2, 0.235]; break;              // key, nothing selected
+        case 5: c = [0.19, 0.2, 0.235]; break;              // key outside the scale
         case 6: c = hsl(p.h, 0.70, 0.50); break;            // step with a note
         case 7: c = [0.21, 0.22, 0.26]; break;              // empty step
         case 8: c = [0.11, 0.115, 0.13]; break;             // past the clip end
         case 9: c = [0.25, 0.5, 0.95]; break;               // option on
         case 10: c = [0.19, 0.2, 0.235]; break;             // option off
         case 11: c = [0.35, 0.85, 0.45]; break;             // playhead
+        case 12: c = [0.35, 0.85, 0.45]; break;             // the word's own note
         default: c = EMPTY;
     }
     if (p.hit) c = mix(c, [1, 1, 1], 0.62);
@@ -149,7 +150,7 @@ function paint() {
                 if (p.t != 0) {
                     var fs = BIG ? Math.max(9, Math.min(15, cell * 0.2)) : 8;
                     var lab = fit(p.l, fs, s - 6, p.t == 1);
-                    txt(lab, x + 4, y + fs + 3, fs, (p.t == 1 || p.t == 4 || p.t == 6 || p.t == 11) ? [0.06, 0.06, 0.08] : TXT, 0.95, p.t == 1);
+                    txt(lab, x + 4, y + fs + 3, fs, (p.t == 1 || p.t == 4 || p.t == 6 || p.t == 11 || p.t == 12) ? [0.06, 0.06, 0.08] : TXT, 0.95, p.t == 1);
                 }
             }
             if (pi == selPad) {

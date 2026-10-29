@@ -323,6 +323,7 @@ def build_instrument():
 
     # big view subpatcher
     SP = Patch()
+    SP.obj("inlet", 20, 10, 0, 1, [""])           # pcontrol "open" needs an inlet to reach the window
     rbig = SP.obj("r ---bigui", 80, 10, 0, 1, [""])
     bjsui = SP.ui("jsui", 0, 40, 560, 600, 1, 1, [""], (0, 0, 560, 600), filename="vochop_ui.js",
                   jsarguments=["big"], border=0, parameter_enable=0)
@@ -394,12 +395,15 @@ def build_instrument():
     P.con(nb["InGain"], 0, dbt, 0); P.con(dbt, 0, ing, 1)
 
     # engine -> UI parameter updates (OCT buttons move Octave / Page)
-    sprm = P.obj("route octave page", 1500, 420, 1, 3, ["", "", ""], w=120)
+    sprm = P.obj("route octave page layout keys choke", 1500, 420, 1, 6, [""] * 6, w=220)
     P.con(route, 10, sprm, 0)
     so = P.obj("prepend set", 1500, 450, 1, 1, [""])
     sp = P.obj("prepend set", 1580, 450, 1, 1, [""])
     P.con(sprm, 0, so, 0); P.con(so, 0, nb["Octave"], 0)
     P.con(sprm, 1, sp, 0); P.con(sp, 0, page, 0)
+    for i, box in ((2, layout), (3, keys), (4, choke)):
+        sx = P.obj("prepend set", 1500 + i * 80, 480, 1, 1, [""])
+        P.con(sprm, i, sx, 0); P.con(sx, 0, box, 0)
 
     for b, jn in params:
         pp = P.obj("prepend p " + jn, 0, 0, 1, 1, [""])

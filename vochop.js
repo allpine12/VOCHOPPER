@@ -6,13 +6,14 @@
     and splits every word into 1-3 PARTS; the "rest" slice = word minus its first part
   - pad surface (Push 3 / on-screen grid), top two rows always = words / rests:
       Words layout : 4 row-pairs = 32 words
-      Notes layout : rows 3-8 = in-key keyboard, plays the selected word tuned
-                     (retune~) to the note, with Cloud / Loop / Repeat sustain
+      Notes layout : rows 3-8 = chromatic keyboard in 4ths like Push (C fixed bottom-left),
+                     plays the selected word tuned (retune~) to the note; the word's own
+                     note (rounded to the nearest semitone) is lit green, Cloud / Loop / Repeat sustain
       Seq layout   : rows 3-6 = 32 steps, row 7 = pages, row 8 = step / clip length
   - MIDI note map (what gets recorded into clips):
       0-31  = words 1-32        32-63 = rests of words 1-32
-      64-127 = keys: the selected word tuned; C5-B5 (84-95) = nearest pitch,
-               every octave up/down from there = +/-12
+      64-127 = keys, relative to the selected word: C6 (96) = its own note,
+               every semitone up / down from there = +/-1
   - 8-voice polyphony (gen~ voices), effects, takes, clip recording / step sequencer
 */
 
@@ -29,7 +30,7 @@ var BUF = (jsarguments.length > 1) ? String(jsarguments[1]) : "vochop_buf";
 var NV = 8;
 var MAXREC_MS = 60000;
 var NBINS = 420;
-var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 84, OCT_MIN = -1, OCT_MAX = 1;
+var NWORDS = 32, REST0 = 32, KEY0 = 64, HOME = 96, OCT_MIN = -1, OCT_MAX = 1;
 
 // ---------------------------------------------------------------- params
 var P = {
@@ -131,6 +132,7 @@ function start() {
     updateFx();
     outlet(2, "banks", "getcount");
     outlet(1, "pushboot");
+    sendLeds();
     inputsRefresh();
     if (!words.length && !pendingLoad) setStatus("Press REC and speak (pick AUDIO FROM first) - or drop audio");
     refreshAll();
@@ -271,6 +273,32 @@ function shiftOct(d) {
     buildSurface(); sendUI();
 }
 
+// the 8 buttons above the Push display (taken over while the VoChop track is selected):
+// REC  UNDO  LAYOUT  PAGE  OCT-  OCT+  KEYS  CHOKE
+function upbtn(i) {
+    i = Number(i);
+    if (i == 0) rec(recording ? 0 : 1);
+    else if (i == 1) undo(1);
+    else if (i == 2) setParam("layout", (Math.round(P.layout) + 1) % 3);
+    else if (i == 3) { setParam("page", (Math.round(P.page) + 1) % 4); setInfo("Words " + (P.page * 8 + 1) + "-" + (P.page * 8 + 8)); }
+    else if (i == 4) shiftOct(-1);
+    else if (i == 5) shiftOct(1);
+    else if (i == 6) { setParam("keys", (Math.round(P.keys) + 1) % 4); setInfo("Keys: " + KEYS_NAMES[P.keys]); }
+    else if (i == 7) { setParam("choke", P.choke ? 0 : 1); setInfo("Choke " + (P.choke ? "on" : "off")); }
+    sendLeds();
+}
+
+// change a parameter from the engine: the device control shows it, the engine applies it
+function setParam(name, v) {
+    outlet(2, "setparam", name, v);
+    p(name, v);
+}
+
+// Push palette: 122 white, 123 light grey, 124 dark grey, 125 blue, 126 green, 127 red
+function sendLeds() {
+    outlet(1, "upleds", recording ? 127 : 124, 123, 125, 125, 123, 123, 126, P.choke ? 126 : 124);
+}
+
 function bend(v) {
     bendSemis = ((Number(v) - 64) / 64) * 2;
 }
@@ -303,6 +331,7 @@ function startRecording() {
     else outlet(2, "bus", P.link, "rec", 1, BUF);
     outlet(2, "setrec", 1);
     outlet(1, "rec", 1);
+    sendLeds();
     setStatus(autoRec ? "AUTO REC... stops after 1.5 s of silence" : "REC... speak now - press REC again to chop");
     recTask.cancel();
     recTask.schedule(MAXREC_MS - 200);
@@ -319,6 +348,7 @@ function stopRecording() {
     doneTask.schedule(700);
     outlet(2, "setrec", 0);
     outlet(1, "rec", 0);
+    sendLeds();
     if (recLocal) outlet(2, "lrec", 0);
     else outlet(2, "bus", P.link, "rec", 0);
     if (autoRec) { autoRec = 0; }
@@ -1098,13 +1128,23 @@ function label(sl) {
 // pad index p = row*8 + col, row 0 = bottom row (Push y = 7 - row)
 function rc(row, col) { return row * 8 + col; }
 
+// the selected word's own note, rounded to the nearest semitone (C3 when it has no clear pitch)
+function originNote() {
+    var pt = sel ? ensurePitch(sel) : -1;
+    return pt > 0 ? Math.round(pt) : 60;
+}
+
+// chromatic keyboard in 4ths like Push: C fixed bottom-left, +1 per column, +5 per row.
+// The C below the word's note sits two rows up, so its note lands mid-grid.
+function keyAbsAt(row, col) {
+    var base = 12 * Math.floor(originNote() / 12) - 12 + 12 * P.octave;
+    return base + col + 5 * row;
+}
+
+// MIDI note of a key pad: relative to the word's note (HOME = its own note), -1 outside 64-127
 function keyNoteAt(row, col) {
-    // in-key layout like Push: columns = scale steps, every row up = a 4th (3 steps)
-    var n = scaleInts.length, d = col + 3 * row;
-    var base = HOME + scaleRoot + 12 * P.octave;
-    while (base < KEY0) base += 12;
-    var note = base + Math.floor(d / n) * 12 + scaleInts[d % n];
-    return note > 127 ? -1 : note;
+    var n = HOME + keyAbsAt(row, col) - originNote();
+    return (n < KEY0 || n > 127) ? -1 : n;
 }
 
 function buildSurface() {
@@ -1126,7 +1166,7 @@ function buildSurface() {
         surf[rc(6, col)] = { t: "rest", k: P.page * 8 + col };
     }
     if (P.layout == 1) {
-        for (row = 0; row < 6; row++) for (col = 0; col < 8; col++) surf[rc(row, col)] = { t: "key", n: keyNoteAt(row, col) };
+        for (row = 0; row < 6; row++) for (col = 0; col < 8; col++) surf[rc(row, col)] = { t: "key", n: keyNoteAt(row, col), a: keyAbsAt(row, col) };
     } else {
         for (row = 2; row < 6; row++) for (col = 0; col < 8; col++) surf[rc(row, col)] = { t: "step", i: (5 - row) * 8 + col };
         for (col = 0; col < 8; col++) surf[rc(1, col)] = { t: "spage", i: col };
@@ -1158,8 +1198,9 @@ function sliceForNote(n) {
 }
 
 // pad message: pad <p> <type> <hue> <label> [env...]
-//   types: 0 empty, 1 word, 2 rest, 3 key, 4 key root, 5 key (no slice), 6 step on, 7 step off,
-//          8 step outside clip, 9 option on, 10 option off, 11 playhead
+//   types: 0 empty, 1 word, 2 rest, 3 key in scale, 4 key on the scale root, 5 key outside the scale,
+//          6 step on, 7 step off, 8 step outside clip, 9 option on, 10 option off, 11 playhead,
+//          12 key = the selected word's own note
 function sendUI() {
     outlet(1, "begin");
     var selPad = -1;
@@ -1173,8 +1214,10 @@ function sendUI() {
             outlet(1, ["pad", k, r.t == "word" ? 1 : 2, sl.hue, label(sl)].concat(sliceEnv(sl)));
         } else if (r.t == "key") {
             if (r.n < 0) { outlet(1, "pad", k, 0, 0, "-"); continue; }
-            var root = (((r.n - scaleRoot) % 12) + 12) % 12 == 0;
-            outlet(1, "pad", k, sel ? (root ? 4 : 3) : 5, sel ? sel.hue : 0, noteName(r.n));
+            var pcs = (((r.a - scaleRoot) % 12) + 12) % 12, inScale = false;
+            for (var si = 0; si < scaleInts.length; si++) if (scaleInts[si] == pcs) inScale = true;
+            var kt = r.n == HOME ? 12 : (pcs == 0 ? 4 : (inScale ? 3 : 5));
+            outlet(1, "pad", k, kt, sel ? sel.hue : 0, noteName(r.a));
         } else if (r.t == "step") {
             var gi = seq.page * 32 + r.i, beat = gi * SEQ_RES[seq.res];
             if (beat >= seq.len) outlet(1, "pad", k, 8, 0, "");
@@ -1262,7 +1305,7 @@ function noteOn(n, vel) {
         triggerChop(sl, n, vel, padsForNote(n));
         var pt = ensurePitch(sl);
         setInfo(label(sl) + "   " + fmtSec(sl.e - sl.s) + (pt > 0 ? "   ~" + noteName(pt) : "") + "   note " + n);
-        if (changed && P.layout == 1) sendUI();
+        if (changed && P.layout == 1) { buildSurface(); sendUI(); }
         else if (changed) outlet(1, "selpad", padOfSlice(sl));
         return;
     }
@@ -1348,19 +1391,17 @@ function triggerChop(sl, n, vel, pads, oneShot) {
 
 // keys: the selected slice, tuned to the played note (nearest octave around C5-B5)
 function triggerKey(sl, n, vel, pads) {
-    var pt = ensurePitch(sl);
-    var oct = Math.floor((n - HOME) / 12) * 12, pc = ((n % 12) + 12) % 12;
+    var pt = ensurePitch(sl), rel = n - HOME;
     var mode = [2, 1, 3, 0][clamp(Math.round(P.keys), 0, 3)];
     var rate = 1, tune = null;
     if (pt > 0) {
-        var m = pt + P.pitch + bendSemis;
-        var near = m + ((((pc - Math.round(m)) % 12) + 18) % 12 - 6) + (Math.round(m) - m);
-        var target = near + oct;
+        // the word's own note in perfect intonation, moved by the key's distance from it
+        var target = Math.round(pt) + rel + P.pitch + bendSemis;
         tune = { hz: mtof(target), amt: 100 };
-        // big jumps: move most of the octave with the playback rate, retune~ does the rest
-        if (Math.abs(target - pt) > 7) rate = Math.pow(2, Math.round((target - pt) / 12) * 12 / 12);
+        // big jumps: move whole octaves with the playback rate, retune~ does the rest
+        if (Math.abs(target - pt) > 7) rate = Math.pow(2, Math.round((target - pt) / 12));
     } else {
-        rate = Math.pow(2, clamp((((pc + 6) % 12) - 6) + oct + P.pitch, -36, 36) / 12);
+        rate = Math.pow(2, clamp(rel + P.pitch, -36, 36) / 12);
     }
     startVoice(sl, n, vel, rate, mode, mode != 0, tune, pads, 0);
 }
@@ -1430,7 +1471,7 @@ function waveclick(f) {
     triggerChop(pick, -999, 100, padOfSlice(pick), true);
     for (var q = 0; q < NV; q++) if (voices[q].note == -999) voices[q].held = 0;
     setInfo("Selected " + label(pick) + " - the keys play this word");
-    sendUI();
+    buildSurface(); sendUI();
 }
 
 // ---------------------------------------------------------------- clips
@@ -1684,23 +1725,40 @@ function bankmsg() {
 // ---------------------------------------------------------------- own audio input (Audio From)
 function inputsRefresh() {
     inIO = null; inTypes = []; inChans = [];
+    var ids = [];
     try {
         var dev = new LiveAPI(null, "this_device");
-        var n = dev.getcount("audio_inputs");
-        post("VoChop: device audio inputs: " + n + "\n");
-        if (n < 1) { outlet(2, "inmenu", "clear"); outlet(2, "inmenu", "append", "(no input - use VoChop Input)"); return; }
-        inIO = new LiveAPI(null, "this_device audio_inputs " + (n - 1));
+        // two ways to read the device's audio inputs (DeviceIO objects)
+        var raw = dev.get("audio_inputs");
+        post("VoChop: this_device audio_inputs = " + raw + "\n");
+        var a = (raw instanceof Array) ? raw : String(raw).split(" ");
+        for (var q = 0; q < a.length - 1; q++) if (String(a[q]) == "id" && Number(a[q + 1]) > 0) ids.push(Number(a[q + 1]));
+        if (!ids.length) {
+            var n = dev.getcount("audio_inputs");
+            post("VoChop: audio_inputs count = " + n + "\n");
+            for (q = 0; q < n; q++) ids.push(Number(new LiveAPI(null, "this_device audio_inputs " + q).id));
+        }
+    } catch (e) { post("VoChop: audio input routing not available: " + e + "\n"); }
+    outlet(2, "inmenu", "clear");
+    if (!ids.length) {
+        outlet(2, "inmenu", "append", "No input here - use VoChop Input");
+        outlet(2, "inmenu", "set", 0);
+        return;
+    }
+    try {
+        inIO = new LiveAPI(null, "id " + ids[ids.length - 1]);
         var d = parseJson(inIO.get("available_routing_types"));
+        post("VoChop: routing types = " + JSON.stringify(d) + "\n");
         inTypes = (d && d.available_routing_types) ? d.available_routing_types : [];
-        outlet(2, "inmenu", "clear");
         var cur = parseJson(inIO.get("routing_type")), ci = 0;
         for (var k = 0; k < inTypes.length; k++) {
             outlet(2, "inmenu", "append", String(inTypes[k].display_name));
             if (cur && cur.routing_type && cur.routing_type.identifier == inTypes[k].identifier) ci = k;
         }
+        if (!inTypes.length) outlet(2, "inmenu", "append", "No input here - use VoChop Input");
         outlet(2, "inmenu", "set", ci);
         chansRefresh();
-    } catch (e) { post("VoChop: audio input routing not available: " + e + "\n"); }
+    } catch (e2) { post("VoChop: reading input routing failed: " + e2 + "\n"); }
 }
 
 function chansRefresh() {

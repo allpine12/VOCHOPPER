@@ -12,6 +12,7 @@ outlets = 1;
 
 var surface = null, matrix = null, ctlId = 0, active = 0, wanted = 1, started = 0;
 var octUp = null, octDn = null, octUpId = 0, octDnId = 0;
+var upRow = null, upRowId = 0, leds = [124, 123, 125, 125, 123, 123, 126, 126];
 var types = [], hues = [], hits = [], sent = [];
 var selApi = null, trackId = 0, selectedId = -1, sessionMode = 0, modeWatch = [];
 for (var i = 0; i < 64; i++) { types[i] = 0; hues[i] = 0; hits[i] = 0; sent[i] = -1; }
@@ -29,13 +30,14 @@ function colorFor(p) {
         case 2: return 124;                         // rest of word
         case 3: return 123;                         // key in scale
         case 4: return hueColor(hues[p]);           // root key = colour of the selected word
-        case 5: return 124;                         // key, nothing selected yet
+        case 5: return 124;                         // key outside the scale
         case 6: return hueColor(hues[p]);           // step with a note
         case 7: return 124;                         // empty step
         case 8: return 0;                           // step past the clip end
         case 9: return 125;                         // option on
         case 10: return 124;                        // option off
         case 11: return 126;                        // playhead
+        case 12: return 126;                        // the word's own note (green)
         default: return 0;
     }
 }
@@ -138,13 +140,55 @@ function grab() {
             matrix = new LiveAPI(onMatrix, "id " + id);
             matrix.property = "value";
             grabOct(names);
+            grabUpper(names);
             active = 1;
-            for (var q = 0; q < 64; q++) sent[q] = -1;
             outlet(0, "pushstate", 1);
-            paintAll();
+            repaint();
+            // Push redraws its own pads when the track changes: paint again a moment later
+            repaintTask.cancel(); repaintCount = 0; repaintTask.interval = 200; repaintTask.repeat(4);
             return;
         } catch (e) { post("VoChop push: " + e + "\n"); }
     }
+}
+
+var repaintCount = 0;
+var repaintTask = new Task(function () { repaint(); }, this);
+function repaint() {
+    for (var q = 0; q < 64; q++) sent[q] = -1;
+    paintAll();
+    paintUpper();
+}
+
+// the 8 buttons above the display (Push 2/3 script name: Track_State_Buttons)
+function grabUpper(names) {
+    var cand = ["Track_State_Buttons", "Upper_Display_Buttons"];
+    for (var k = 0; k < cand.length; k++) {
+        if (names.indexOf(cand[k]) < 0) continue;
+        upRowId = parseId(surface.call("get_control", cand[k]));
+        if (!upRowId) continue;
+        surface.call("grab_control", "id", upRowId);
+        upRow = new LiveAPI(onUpper, "id " + upRowId);
+        upRow.property = "value";
+        return;
+    }
+    post("VoChop push: no button row above the display found\n");
+}
+
+function onUpper(a) {
+    if (!active || !a || a[0] != "value" || a.length < 3) return;
+    if (Number(a[1]) > 0) outlet(0, "upbtn", Number(a[2]));
+}
+
+function paintUpper() {
+    if (!upRow) return;
+    for (var k = 0; k < 8; k++) { try { upRow.call("send_value", k, 0, leds[k]); } catch (e) { } }
+}
+
+// LED colours for the 8 buttons, from the engine
+function upleds() {
+    var a = arrayfromargs(arguments);
+    for (var k = 0; k < 8 && k < a.length; k++) leds[k] = Number(a[k]);
+    if (active) paintUpper();
 }
 
 function grabOct(names) {
@@ -169,13 +213,15 @@ function onOctDn(a) { if (active && a && a[0] == "value" && Number(a[1]) > 0) ou
 
 function release() {
     if (surface) {
-        var ids = [ctlId, octUpId, octDnId];
+        var ids = [ctlId, octUpId, octDnId, upRowId];
         for (var k = 0; k < ids.length; k++) if (ids[k]) { try { surface.call("release_control", "id", ids[k]); } catch (e) { } }
     }
     if (matrix) { try { matrix.property = ""; } catch (e2) { } }
     if (octUp) { try { octUp.property = ""; } catch (e3) { } }
     if (octDn) { try { octDn.property = ""; } catch (e4) { } }
-    surface = null; matrix = null; ctlId = 0; octUp = null; octDn = null; octUpId = 0; octDnId = 0;
+    if (upRow) { try { upRow.property = ""; } catch (e5) { } }
+    repaintTask.cancel();
+    surface = null; matrix = null; ctlId = 0; octUp = null; octDn = null; octUpId = 0; octDnId = 0; upRow = null; upRowId = 0;
     if (active) outlet(0, "pushstate", 0);
     active = 0;
 }

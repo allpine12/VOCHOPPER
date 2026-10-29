@@ -52,21 +52,26 @@ ctx.padclick(58, 100);
 assert(vm0().some((m) => m[0] === firstVoice && m[1] === "g" && m[2] === "kill"), "choke kills previous chop voice");
 ctx.padclick(56, 0); ctx.padclick(58, 0);
 
-// ---- key pad: cloud mode, retune locked to the played pitch class, keeps sounding until release
+// ---- key pad: chromatic 4ths, C bottom-left, word's own note mid-grid, plays the pad's real pitch
 ctx.padclick(56, 100); ctx.padclick(56, 0);       // select word 1
+const org = ctx.originNote();
+assert.strictEqual(((ctx.surf[0].a % 12) + 12) % 12, 0, "bottom-left is a C");
+assert.strictEqual(ctx.surf[1].a - ctx.surf[0].a, 1, "+1 per column");
+assert.strictEqual(ctx.surf[8].a - ctx.surf[0].a, 5, "+5 per row (4ths)");
+const oPad = ctx.surf.findIndex((r) => r && r.t == "key" && r.a == org);
+assert(oPad >= 8 && oPad < 40, "word's own note sits mid-grid: pad " + oPad);
+assert.strictEqual(ctx.surf[oPad].n, ctx.HOME, "own note = MIDI 96");
 take();
 const keyPad = 0, kn = ctx.surf[keyPad].n;
 ctx.padclick(keyPad, 100);
 v = vm0().filter((m) => m[1] === "g"); const k = {}; v.forEach((m) => k[m[2]] = m[3]);
-assert.strictEqual(k.mode, 2, "cloud mode");
+assert.strictEqual(k.mode, ctx.P.keys == 0 ? 2 : k.mode, "cloud mode");
 const t = vm0().find((m) => m[1] === "t");
 const pt = ctx.ensurePitch(ctx.words[0]);
 if (pt > 0) {
-  assert(t[2] > 0, "retune target");
   const midi = 69 + 12 * Math.log2(t[2] / 440);
-  assert(Math.abs(((Math.round(midi) - kn) % 12 + 12) % 12) == 0, "pitch class matches key " + midi + " vs " + kn);
-  assert(Math.abs(midi - pt) <= 6.5 + Math.abs(Math.floor((kn - 84) / 12) * 12), "nearest octave");
-  console.log("word 1 pitch", pt.toFixed(1), "key", kn, "->", midi.toFixed(2));
+  assert(Math.abs(midi - ctx.surf[keyPad].a) < 1e-6, "plays the pad's own pitch " + midi + " vs " + ctx.surf[keyPad].a);
+  console.log("word 1 pitch", pt.toFixed(1), "own note", org, "bottom-left", ctx.surf[0].a, "->", midi.toFixed(2));
 }
 take();
 ctx.padclick(keyPad, 0);

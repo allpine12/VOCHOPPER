@@ -30,7 +30,7 @@ Preuzimanje s GitHuba: zeleni gumb **Code → Download ZIP**, raspakiraj i preim
    - **AUTO**: snimanje krene kad počneš govoriti i stane nakon 1,5 s tišine (prag = dial *Thresh*).
    - **THRU**: čuješ mikrofon kroz VoChop.
    - Možeš i povući audio fajl ili clip na **DROP**.
-4. Ako AUDIO FROM ostane prazan ili ne snima, tvoja verzija Livea ne daje instrumentima audio ulaz.
+4. Ako AUDIO FROM pokazuje *No input here - use VoChop Input* (ili ne snima), Live ovom instrumentu ne daje audio ulaz.
    Tada stavi `VoChop Input.amxd` na audio traku s mikrofonom (Monitor: In). Oba devicea moraju imati isti **Link**.
 
 ## 2. Push 3
@@ -46,14 +46,14 @@ Push se vraća na svoje. Gumb **PUSH PADS** to potpuno isključuje.
 
 | Layout | Donjih 6 redova |
 |---|---|
-| **Notes** (default) | Klavijatura u ljestvici Live seta (kao Push, kvarte). Svira **odabranu riječ** na toj noti. Akord = riječ u akordu. |
+| **Notes** (default) | Kromatska klavijatura u kvartama kao na Pushu: C fiksno dolje lijevo, desno +1, red gore +5. **Zeleni pad = vlastita nota riječi** (zaokružena na najbliži polutoni, npr. povišeni B = C). Gore su više note, dolje niže. Svira **odabranu riječ** na toj noti, akord = riječ u akordu. |
 | **Seq** | Step sequencer u clip: redovi 3–6 = 32 koraka, red 7 = stranice, red 8 = rezolucija (1/32–1/4) i duljina clipa (1–8 taktova). Klikneš riječ gore, pa korak gdje će stajati. |
 | **Words** | Cijeli grid su riječi: 4 para redova = 32 riječi (riječ + drugi dio). |
 
 U Notes/Seq gornja dva reda pokazuju 8 riječi. **Page** (ili Octave tipke na Pushu u Words/Seq) prebacuje na riječi 9–16, 17–24, 25–32.
-U Notes layoutu Octave tipke na Pushu mijenjaju oktavu klavijature (-1, 0, +1).
+U Notes layoutu Octave tipke na Pushu mijenjaju oktavu klavijature (-1, 0, +1). Kad odabereš drugu riječ, klavijatura se pomakne tako da njena nota bude oko sredine.
 
-**Gumbi iznad ekrana** (Push banke parametara): `Rec · Undo · Layout · Page · Oct- · Oct+ · Keys · Choke`.
+**Gumbi iznad ekrana** (dok je VoChop traka odabrana, VoChop ih preuzme kao i padove): `Rec · Undo · Layout · Page · Oct- · Oct+ · Keys · Choke`.
 Undo vraća prethodni take. Ekran pokazuje banke **Main** (Layout, Keys, AutoTune, Key, Pitch, Attack, Release, Volume),
 **FX** (Reverb, Size, Delay, Time, Feedback, Crush, Drive, Cutoff) i **Chop**.
 
@@ -64,7 +64,7 @@ Note u clipu znače:
 |---|---|
 | 0–31 (C-2…G0) | riječi 1–32 |
 | 32–63 (G#0…D#3) | drugi dio riječi 1–32 |
-| 64–127 | odabrana riječ na toj visini. C5–B5 = najbliža oktava glasu, svaka oktava gore/dolje = ±12 |
+| 64–127 | odabrana riječ, relativno: C6 (96) = njena vlastita nota, svaki polutoni gore/dolje = ±1 |
 
 Nota riječi ujedno **odabire** riječ, pa se u clipu snima i koju si riječ svirao.
 **MAKE CLIP** napravi clip u kojem su sve riječi fraze redom.
